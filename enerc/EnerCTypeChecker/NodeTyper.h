@@ -91,7 +91,7 @@ private:
     if (vdecl) {
       // For function declarations, qualify the return type. Otherwise, qualify
       // the type itself.
-      if (clang::FunctionDecl *fundecl = dyn_cast<clang::FunctionDecl>(decl)) {
+      if (clang::FunctionDecl *fundecl = clang::dyn_cast<clang::FunctionDecl>(decl)) {
         setReturnQuals(fundecl, type);
       } else {
         vdecl->setType(withQuals(vdecl->getType(), type));

@@ -2,8 +2,8 @@
 
 void TyperConsumer::reportError(clang::Stmt* stmt,
                                 llvm::StringRef message) {
-  clang::Diagnostic &deng = ci.getDiagnostics();
-  unsigned did = deng.getCustomDiagID(clang::Diagnostic::Error, message);
+  clang::DiagnosticsEngine &deng = ci.getDiagnostics();
+  unsigned did = deng.getCustomDiagID(clang::DiagnosticsEngine::Error, message);
   clang::DiagnosticBuilder db = deng.Report(stmt->getLocStart(), did);
   db.AddSourceRange(clang::CharSourceRange(stmt->getSourceRange(), false));
 }

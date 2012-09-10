@@ -126,10 +126,10 @@ EnerCQualifier EnerCTyper::typeForExpr(clang::Expr *expr) {
     return ecPrecise;
 
   // VARIABLE REFERENCES
-  case clang::Stmt::BlockDeclRefExprClass: {
-    clang::BlockDeclRefExpr* tex = cast<clang::BlockDeclRefExpr>(expr);
-    return typeOf(tex->getDecl());
-  }
+//  case clang::Stmt::BlockDeclRefExprClass: {
+//    clang::BlockDeclRefExpr* tex = cast<clang::BlockDeclRefExpr>(expr);
+//    return typeOf(tex->getDecl());
+//  }
   case clang::Stmt::DeclRefExprClass: {
     clang::DeclRefExpr* tex = cast<clang::DeclRefExpr>(expr);
     DEBUG(llvm::errs() << "variable reference");

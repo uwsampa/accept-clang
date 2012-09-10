@@ -21,7 +21,7 @@ public:
   TyperVisitor<TypeT, TyperT>( clang::CompilerInstance& _ci ) :
       TyperConsumer( _ci ), typer(TyperT(this)) {
   }
-  virtual void HandleTopLevelDecl( clang::DeclGroupRef DG );
+  virtual bool HandleTopLevelDecl( clang::DeclGroupRef DG );
 
   // Tree walking.
   virtual bool TraverseDecl( clang::Decl* decl );
@@ -36,7 +36,7 @@ bool TyperVisitor<TypeT, TyperT>::TraverseDecl( clang::Decl* decl ) {
   // Is this declaration a function? If so, keep track of this.
   clang::FunctionDecl *fundecl = NULL;
   if (decl) {
-    fundecl = dyn_cast<clang::FunctionDecl>(decl);
+    fundecl = clang::dyn_cast<clang::FunctionDecl>(decl);
     if (fundecl) {
       typer.setCurFunction(fundecl);
     }
@@ -67,14 +67,15 @@ bool TyperVisitor<TypeT, TyperT>::TraverseStmt( clang::Stmt* stmt ) {
 
 // Called by the plugin API to begin traversal.
 template <class TypeT, class TyperT>
-void TyperVisitor<TypeT, TyperT>::HandleTopLevelDecl( clang::DeclGroupRef DG ) {
+bool TyperVisitor<TypeT, TyperT>::HandleTopLevelDecl( clang::DeclGroupRef DG ) {
   for ( clang::DeclGroupRef::iterator i = DG.begin(), e = DG.end();
         i != e; ++i ) {
-    clang::NamedDecl *ND = dyn_cast<clang::NamedDecl>( *i );
+    clang::NamedDecl *ND = clang::dyn_cast<clang::NamedDecl>( *i );
     if ( ND ) {
       TraverseDecl( ND );
     }
   }
+  return true;
 }
 
 #endif
