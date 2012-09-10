@@ -27,6 +27,7 @@
 #include "llvm/LLVMContext.h"
 #include "llvm/MDBuilder.h"
 #include "llvm/Target/TargetData.h"
+#include "llvm/Support/Debug.h"
 using namespace clang;
 using namespace CodeGen;
 
@@ -918,6 +919,39 @@ CodeGenFunction::tryEmitAsConstant(DeclRefExpr *refExpr) {
   return ConstantEmission::forValue(C);
 }
 
+// @quals
+void CodeGenFunction::addQualData(llvm::Instruction *inst, QualType ty) {
+  if (inst->getMetadata("quals")) {
+    // llvm::errs() << "already has metadata: ";
+    // inst->dump();
+    return;
+  }
+
+  uint32_t customQuals;
+  if (ty.hasLocalNonFastQualifiers())
+    customQuals = ty.getQualifiers().getCustomQuals();
+  else
+    customQuals = 0;
+
+  std::vector<llvm::Value*> qualVals;
+  qualVals.push_back(llvm::ConstantInt::get(Int32Ty, customQuals, false));
+  llvm::MDNode *qualMD = llvm::MDNode::get(inst->getContext(), qualVals);
+  inst->setMetadata("quals", qualMD);
+}
+void CodeGenFunction::addQualData(llvm::Value *value, QualType ty) {
+  if (value == NULL)
+    return;
+
+  llvm::Instruction *inst = dyn_cast<llvm::Instruction>(value);
+  if (inst) {
+    addQualData(inst, ty);
+  } else {
+    DEBUG(llvm::errs() << "addQualData called with non-instruction\n");
+    DEBUG(value->dump());
+    DEBUG(llvm::errs() << "\n");
+  }
+}
+
 llvm::Value *CodeGenFunction::EmitLoadOfScalar(LValue lvalue) {
   return EmitLoadOfScalar(lvalue.getAddress(), lvalue.isVolatile(),
                           lvalue.getAlignment().getQuantity(),
@@ -1036,6 +1070,9 @@ llvm::Value *CodeGenFunction::EmitLoadOfScalar(llvm::Value *Addr, bool Volatile,
     if (llvm::MDNode *RangeInfo = getRangeForLoadFromType(Ty))
       Load->setMetadata(llvm::LLVMContext::MD_range, RangeInfo);
 
+  // @quals
+  addQualData(Load, Ty);
+
   return EmitFromMemory(Load, Ty);
 }
 
@@ -1106,6 +1143,12 @@ void CodeGenFunction::EmitStoreOfScalar(llvm::Value *Value, llvm::Value *Addr,
   Value = EmitToMemory(Value, Ty);
   
   llvm::StoreInst *Store = Builder.CreateStore(Value, Addr, Volatile);
+
+  // @quals
+  DEBUG(llvm::errs() << "store " << Ty.getQualifiers().getCustomQuals()
+                     << "\n");
+  addQualData(Store, Ty);
+
   if (Alignment)
     Store->setAlignment(Alignment);
   if (TBAAInfo)
@@ -1196,6 +1239,9 @@ RValue CodeGenFunction::EmitLoadOfBitfieldLValue(LValue LV) {
     // Perform the load.
     llvm::LoadInst *Load = Builder.CreateLoad(Ptr, LV.isVolatileQualified());
     Load->setAlignment(AccessAlignment.getQuantity());
+
+    // @quals
+    addQualData(Load, LV.getType());
 
     // Shift out unused low bits and mask out unused high bits.
     llvm::Value *Val = Load;

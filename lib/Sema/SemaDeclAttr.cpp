@@ -4190,6 +4190,53 @@ static void handleForceInlineAttr(Sema &S, Decl *D, const AttributeList &Attr) {
     S.Diag(Attr.getLoc(), diag::warn_attribute_ignored) << Attr.getName();
 }
 
+// @quals
+void handleTypeQualifier(Decl *d, const AttributeList &Attr, Sema &S) {
+  if (!isa<VarDecl>(d) && !isFunctionOrMethod(d) && !isa<FieldDecl>(d)) {
+    S.Diag(Attr.getLoc(), diag::warn_attribute_wrong_decl_type)
+    << Attr.getName() << ExpectedVariableOrFunction;
+    return;
+  }
+  
+  // Copied & pasted from above: get the string corresponding to the
+  // attribute's lone argument.
+  if (Attr.getNumArgs() != 1) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments) << 1;
+    return;
+  }
+  Expr *Arg = Attr.getArg(0);
+  StringLiteral *Str = dyn_cast<StringLiteral>(Arg);
+  if (Str == 0 || Str->isWide()) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_argument_n_not_string)
+    << "type qualifier" << 1;
+    return;
+  }
+  //std::string attrArg(Str->getString());
+  
+  // Add the qualifier to the declaration's type.
+  DeclaratorDecl* dd = cast<DeclaratorDecl>(d);
+  // NEW: Don't muck with types here. That's handled by the NodeTyper.
+  /*
+   QualType oldType = dd->getType();
+   Qualifiers quals = oldType.getQualifiers();
+   //llvm::errs() << "[DEBUG] before0: " << quals.getAsOpaqueValue();
+   // quals.addSiftedTQ( Qualifiers::siftedTQOfStr(Str->getString()) );
+   //llvm::errs() << " before1: " << quals.getAsOpaqueValue() << "\n";
+   
+   QualType newType = dd->getASTContext().getExtQualType(oldType.getTypePtr(), quals);
+   dd->setType(newType);
+   */
+  
+  //dd->dump();
+  //llvm::errs() << "[DEBUG] after0: " << newType.getQualifiers().getAsOpaqueValue() << "\n";
+  
+  // rewriting function types doesn't persist, so we use a proper Attribute instead
+  dd->addAttr(::new TypeQualifierAttr(Attr.getLoc(), S.Context, Str->getString()));
+  
+  // llvm::StringRef name = vd->getName();
+  // printf("%s: %s\n", name.data(), attrArg.c_str());
+}
+
 //===----------------------------------------------------------------------===//
 // Top Level Sema Entry Points
 //===----------------------------------------------------------------------===//
@@ -4457,6 +4504,11 @@ static void ProcessInheritableDeclAttr(Sema &S, Scope *scope, Decl *D,
     handleTypeTagForDatatypeAttr(S, D, Attr);
     break;
 
+  // @quals
+  case AttributeList::AT_TypeQualifier:
+    handleTypeQualifier(D, Attr, S);
+    break;    
+
   default:
     // Ask target about the attribute.
     const TargetAttributesSema &TargetAttrs = S.getTargetAttributesSema();
@@ -4479,7 +4531,7 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
     return;
 
   // Type attributes are still treated as declaration attributes by 
-  // ParseMicrosoftTypeAttributes and ParseBorlandTypeAttributes.  We don't 
+  // ParseMicrosoftTypeAttributes and ParseBorlandTypeAttributes.  We don't
   // want to process them, however, because we will simply warn about ignoring 
   // them.  So instead, we will bail out early.
   if (Attr.isMSTypespecAttribute())
@@ -4822,3 +4874,5 @@ void Sema::EmitDeprecationWarning(NamedDecl *D, StringRef Message,
     return;
   DoEmitDeprecationWarning(*this, D, Message, Loc, UnknownObjCClass);
 }
+
+

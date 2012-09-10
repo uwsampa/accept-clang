@@ -1139,6 +1139,19 @@ TryImplicitConversion(Sema &S, Expr *From, QualType ToType,
                       bool InOverloadResolution,
                       bool CStyle,
                       bool AllowObjCWritebackConversion) {
+
+  // @quals debug.
+  //if (From->getType().hasLocalNonFastQualifiers() && From->getType().getQualifiers().hasCustomQuals()) {
+  //  llvm::errs() << "from type is qualified:";
+  //  From->getType().dump();
+  //  llvm::errs() << "\n";
+  //}
+  //if (ToType.hasLocalNonFastQualifiers() && ToType.getQualifiers().hasCustomQuals()) {
+  //  llvm::errs() << "to type is qualified:";
+  //  ToType.dump();
+  //  llvm::errs() << "\n";
+  //}
+  
   ImplicitConversionSequence ICS;
   if (IsStandardConversion(S, From, ToType, InOverloadResolution,
                            ICS.Standard, CStyle, AllowObjCWritebackConversion)){
@@ -1329,7 +1342,41 @@ static bool tryAtomicConversion(Sema &S, Expr *From, QualType ToType,
                                 bool InOverloadResolution,
                                 StandardConversionSequence &SCS,
                                 bool CStyle);
-  
+
+
+// EnerC
+QualType stripCustomQuals(Sema &S, QualType typ) {
+  // llvm::errs() << typ.hasLocalNonFastQualifiers() << " "
+  //              << typ.getTypePtr() << "\n";
+  if (typ.hasLocalNonFastQualifiers() && typ.getQualifiers().hasCustomQuals()) {
+    // llvm::errs() << typ.hasLocalNonFastQualifiers() << "\n";
+    // typ.dump();
+
+    Qualifiers quals = typ.getQualifiers();
+    quals = Qualifiers::fromOpaqueValue(quals.getAsOpaqueValue()); // not custom-quals-aware
+    if (quals.hasNonFastQualifiers()) {
+      // Has other non-fast qualifiers. Preserve them.
+      // llvm::errs() << "preserving\n";
+      return S.Context.getExtQualType(typ.getTypePtr(), quals);
+    } else {
+      // No other non-fast qualifiers.
+      // llvm::errs() << "canonicalizing\n";
+      QualType newtyp = typ.getUnqualifiedType();
+      newtyp.setLocalFastQualifiers(typ.getLocalFastQualifiers());
+      return newtyp.getCanonicalType();
+    }
+
+    // Then, canonicalize the type, removing the external qualifier if it is no
+    // longer necessary.
+    if (!typ.hasLocalNonFastQualifiers())
+      typ = typ.getCanonicalType();
+  }
+
+  // No custom qualifiers present; leave type untouched.
+  return typ;
+}
+
+
 /// IsStandardConversion - Determines whether there is a standard
 /// conversion sequence (C++ [conv], C++ [over.ics.scs]) from the
 /// expression From to the type ToType. Standard conversion sequences
@@ -1344,6 +1391,12 @@ static bool IsStandardConversion(Sema &S, Expr* From, QualType ToType,
                                  bool CStyle,
                                  bool AllowObjCWritebackConversion) {
   QualType FromType = From->getType();
+
+  // @quals: Remove custom qualifiers for the purposes of conversion. (Usage has
+  // already been type-checked.)
+  // TODO: verify that this is still valid for Grappa uses
+  FromType = stripCustomQuals(S, FromType);
+  ToType = stripCustomQuals(S, ToType);
 
   // Standard conversions (C++ [conv])
   SCS.setAsIdentityConversion();

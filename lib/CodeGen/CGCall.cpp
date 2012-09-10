@@ -1576,6 +1576,15 @@ void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI) {
   }
 
   llvm::Instruction *Ret = RV ? Builder.CreateRet(RV) : Builder.CreateRetVoid();
+
+  // @quals
+  if (RV) {
+    const FunctionDecl *fundecl = dyn_cast<FunctionDecl>(CurGD.getDecl());
+    if (fundecl) {
+      addQualData(Ret, fundecl->getResultType());
+    }
+  }
+
   if (!RetDbgLoc.isUnknown())
     Ret->setDebugLoc(RetDbgLoc);
 }

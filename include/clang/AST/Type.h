@@ -109,6 +109,7 @@ namespace clang {
 /// * C99: const, volatile, and restrict
 /// * Embedded C (TR18037): address spaces
 /// * Objective C: the GC attributes (none, weak, or strong)
+/// * Custom Qualifiers: for use by custom typesystems
 class Qualifiers {
 public:
   enum TQ { // NOTE: These flags must be kept in sync with DeclSpec::TQ.
@@ -158,12 +159,20 @@ public:
     FastMask = (1 << FastWidth) - 1
   };
 
-  Qualifiers() : Mask(0) {}
+  Qualifiers() : Mask(0), customQuals(0) {}
 
   static Qualifiers fromFastMask(unsigned Mask) {
     Qualifiers Qs;
     Qs.addFastQualifiers(Mask);
     return Qs;
+  }
+
+  // Custom qualifiers! @quals
+  bool hasCustomQuals() const { return customQuals != 0; }
+  uint32_t getCustomQuals() const { return customQuals; }
+  void setCustomQuals(uint32_t mask) { customQuals = mask; }
+  bool equalCustomQuals(Qualifiers other) const {
+    return other.customQuals == customQuals;
   }
 
   static Qualifiers fromCVRMask(unsigned CVR) {
@@ -305,7 +314,10 @@ public:
 
   /// hasNonFastQualifiers - Return true if the set contains any
   /// qualifiers which require an ExtQuals node to be allocated.
-  bool hasNonFastQualifiers() const { return Mask & ~FastMask; }
+  bool hasNonFastQualifiers() const {
+    return Mask & ~FastMask || hasCustomQuals();
+  }
+
   Qualifiers getNonFastQualifiers() const {
     Qualifiers Quals = *this;
     Quals.setFastQualifiers(0);
@@ -313,14 +325,14 @@ public:
   }
 
   /// hasQualifiers - Return true if the set contains any qualifiers.
-  bool hasQualifiers() const { return Mask; }
-  bool empty() const { return !Mask; }
+  bool hasQualifiers() const { return Mask || hasCustomQuals(); }
+  bool empty() const { return !Mask && !hasCustomQuals(); }
 
   /// \brief Add the qualifiers from the given set to this set.
   void addQualifiers(Qualifiers Q) {
     // If the other set doesn't have any non-boolean qualifiers, just
     // bit-or it in.
-    if (!(Q.Mask & ~CVRMask))
+    if (!(Q.Mask & ~CVRMask) && !Q.hasCustomQuals())
       Mask |= Q.Mask;
     else {
       Mask |= (Q.Mask & CVRMask);
@@ -330,6 +342,8 @@ public:
         addObjCGCAttr(Q.getObjCGCAttr());
       if (Q.hasObjCLifetime())
         addObjCLifetime(Q.getObjCLifetime());
+      if (Q.hasCustomQuals())
+        setCustomQuals(Q.getCustomQuals());
     }
   }
 
@@ -343,6 +357,9 @@ public:
     assert(getObjCLifetime() == qs.getObjCLifetime() ||
            !hasObjCLifetime() || !qs.hasObjCLifetime());
     Mask |= qs.Mask;
+    if (qs.hasCustomQuals()) {
+      setCustomQuals(qs.getCustomQuals());
+    }
   }
 
   /// \brief Determines if these qualifiers compatibly include another set.
@@ -359,7 +376,9 @@ public:
       // ObjC lifetime qualifiers must match exactly.
       getObjCLifetime() == other.getObjCLifetime() &&
       // CVR qualifiers may subset.
-      (((Mask & CVRMask) | (other.Mask & CVRMask)) == (Mask & CVRMask));
+      (((Mask & CVRMask) | (other.Mask & CVRMask)) == (Mask & CVRMask)) &&
+      // same custom qualifiers
+      equalCustomQuals(other);
   }
 
   /// \brief Determines if these qualifiers compatibly include another set of
@@ -382,8 +401,12 @@ public:
   /// another set of qualifiers, not considering qualifier compatibility.
   bool isStrictSupersetOf(Qualifiers Other) const;
 
-  bool operator==(Qualifiers Other) const { return Mask == Other.Mask; }
-  bool operator!=(Qualifiers Other) const { return Mask != Other.Mask; }
+  bool operator==(Qualifiers Other) const {
+    return Mask == Other.Mask && equalCustomQuals(Other);
+  }
+  bool operator!=(Qualifiers Other) const {
+    return Mask != Other.Mask || !equalCustomQuals(Other);
+  }
 
   operator bool() const { return hasQualifiers(); }
 
@@ -419,6 +442,7 @@ public:
 
   void Profile(llvm::FoldingSetNodeID &ID) const {
     ID.AddInteger(Mask);
+    ID.AddInteger(customQuals);
   }
 
 private:
@@ -426,6 +450,7 @@ private:
   // bits:     |0 1 2|3 .. 4|5  ..  7|8   ...   31|
   //           |C R V|GCAttr|Lifetime|AddressSpace|
   uint32_t Mask;
+  uint32_t customQuals;
 
   static const uint32_t GCAttrMask = 0x18;
   static const uint32_t GCAttrShift = 3;

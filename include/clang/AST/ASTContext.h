@@ -736,10 +736,11 @@ public:
   //                           Type Constructors
   //===--------------------------------------------------------------------===//
 
-private:
+public: // @Quals (was private)
   /// \brief Return a type with extended qualifiers.
   QualType getExtQualType(const Type *Base, Qualifiers Quals) const;
 
+private:
   QualType getTypeDeclTypeSlow(const TypeDecl *Decl) const;
 
 public:

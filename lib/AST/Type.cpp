@@ -39,7 +39,9 @@ bool Qualifiers::isStrictSupersetOf(Qualifiers Other) const {
      (hasAddressSpace()&& !Other.hasAddressSpace())) &&
     // Lifetime qualifier superset.
     ((getObjCLifetime() == Other.getObjCLifetime()) ||
-     (hasObjCLifetime() && !Other.hasObjCLifetime()));
+     (hasObjCLifetime() && !Other.hasObjCLifetime())) &&
+    // check customQuals
+    !equalCustomQuals(Other) && (customQuals | Other.customQuals) == customQuals;
 }
 
 const IdentifierInfo* QualType::getBaseTypeIdentifier() const {

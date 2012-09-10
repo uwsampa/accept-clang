@@ -860,6 +860,8 @@ CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
         llvm::AllocaInst *Alloc = CreateTempAlloca(LTy);
         Alloc->setName(D.getName());
 
+        addQualData(Alloc, Ty); // @quals
+
         CharUnits allocaAlignment = alignment;
         if (isByRef)
           allocaAlignment = std::max(allocaAlignment,
@@ -902,6 +904,8 @@ CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
     // Allocate memory for the array.
     llvm::AllocaInst *vla = Builder.CreateAlloca(llvmTy, elementCount, "vla");
     vla->setAlignment(alignment.getQuantity());
+
+    addQualData(vla, Ty); //@quals
 
     DeclPtr = vla;
   }

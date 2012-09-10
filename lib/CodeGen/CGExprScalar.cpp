@@ -102,6 +102,7 @@ public:
   /// EmitScalarConversion - Emit a conversion from the specified type to the
   /// specified destination type, both of which are LLVM scalar types.
   Value *EmitScalarConversion(Value *Src, QualType SrcTy, QualType DstTy);
+  Value *EmitScalarConversionHelper(Value *Src, QualType SrcTy, QualType DstTy); // @quals
 
   /// EmitComplexToScalarConversion - Emit a conversion from the specified
   /// complex type to the specified destination type, where the destination type
@@ -150,7 +151,10 @@ public:
   //===--------------------------------------------------------------------===//
 
   Value *Visit(Expr *E) {
-    return StmtVisitor<ScalarExprEmitter, Value*>::Visit(E);
+    Value *out = StmtVisitor<ScalarExprEmitter, Value*>::Visit(E);
+    // @quals
+    CGF.addQualData(out, E->getType());
+    return out;
   }
     
   Value *VisitStmt(Stmt *S) {
@@ -541,9 +545,20 @@ Value *ScalarExprEmitter::EmitConversionToBool(Value *Src, QualType SrcType) {
   return EmitPointerToBoolConversion(Src);
 }
 
+// @quals
+Value *ScalarExprEmitter::EmitScalarConversion(Value *Src, QualType SrcType,
+                                               QualType DstType) {
+  Value *out = EmitScalarConversionHelper(Src, SrcType, DstType);
+  if (out) {
+    CGF.addQualData(out, SrcType);
+  }
+  return out;
+}
+
+
 /// EmitScalarConversion - Emit a conversion from the specified type to the
 /// specified destination type, both of which are LLVM scalar types.
-Value *ScalarExprEmitter::EmitScalarConversion(Value *Src, QualType SrcType,
+Value *ScalarExprEmitter::EmitScalarConversionHelper(Value *Src, QualType SrcType,
                                                QualType DstType) {
   SrcType = CGF.getContext().getCanonicalType(SrcType);
   DstType = CGF.getContext().getCanonicalType(DstType);
@@ -2341,7 +2356,11 @@ Value *ScalarExprEmitter::EmitCompare(const BinaryOperator *E,unsigned UICmpOpc,
     }
   }
 
-  return EmitScalarConversion(Result, CGF.getContext().BoolTy, E->getType());
+  // @quals
+  CGF.addQualData(Result, LHSTy);
+  Value *outVal = EmitScalarConversion(Result, CGF.getContext().BoolTy, E->getType());
+  CGF.addQualData(outVal, LHSTy);
+  return outVal;
 }
 
 Value *ScalarExprEmitter::VisitBinAssign(const BinaryOperator *E) {

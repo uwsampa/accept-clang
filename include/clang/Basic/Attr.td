@@ -888,3 +888,11 @@ def MultipleInheritance : InheritableAttr {
 def VirtualInheritance : InheritableAttr {
   let Spellings = [Declspec<"__virtual_inheritance">];
 }
+
+// @quals
+def TypeQualifier : InheritableAttr {
+  let Spellings = [GNU<"qual">];
+  let Subjects = [Var];
+  let Args = [StringArgument<"Name">];
+}
+
