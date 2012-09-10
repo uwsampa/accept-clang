@@ -1,0 +1,25 @@
+EnerC Type Checker
+==================
+
+This directory contains a Clang plugin (which only works with the accompanying
+Clang, which is augmented with logic supporting type qualifiers) that performs
+EnerC type checking. When the plugin is included, EnerC invariants are checked
+in annotated C/C++ code and propagated to the resulting LLVM bitcode.
+
+To build the plugin:
+  
+    cd EnerCTypeChecker
+    make
+
+Then, to check/compile EnerC code:
+
+    ./bin/enerclang foo.c
+
+(The `enerclang` program behaves just like `clang` but adds the EnerC plugin.)
+To run some test compilations:
+
+    ./test/runtests.sh
+
+Note that the EnerCTypeChecker directory (messily) contains both generic
+extensible type qualifier checking support and EnerC-specific logic. These
+should eventually be decoupled.
