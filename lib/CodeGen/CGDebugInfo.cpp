@@ -482,7 +482,7 @@ llvm::DIType CGDebugInfo::CreateQualifiedType(QualType Ty, llvm::DIFile Unit) {
     Tag = llvm::dwarf::DW_TAG_restrict_type;
     Qc.removeRestrict();
   } else {
-    assert(Qc.empty() && "Unknown type qualifier for debug info");
+    assert((Qc.empty() || Qc.hasCustomQuals()) && "Unknown type qualifier for debug info");
     return getOrCreateType(QualType(T, 0), Unit);
   }
 
