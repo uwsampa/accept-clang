@@ -5,8 +5,8 @@ enercdir=`dirname $0`/..
 incdir=$enercdir/include
 clangdir=$enercdir/..
 llvmdir=$clangdir/../..
-llvmbuilddir=$llvmdir/$BUILDMODE
-clang=$llvmbuilddir/bin/clang
+llvmbuilddir=$llvmdir/build/xcode
+clang=$llvmbuilddir/bin/$BUILDMODE/clang
 
 if [ `basename $0` = "enerclang++" ]; then
     clang="$clang++"
@@ -17,6 +17,6 @@ if [ `uname` = "Darwin" ]; then
 else
     libext=so
 fi
-enerclib=$llvmbuilddir/lib/libEnerCTypeChecker.$libext
+enerclib=$llvmbuilddir/lib/$BUILDMODE/libEnerCTypeChecker.$libext
 
 exec $clang -Xclang -load -Xclang $enerclib -Xclang -add-plugin -Xclang enerc-type-checker -I $incdir $@
