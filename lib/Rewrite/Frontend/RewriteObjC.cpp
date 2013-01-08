@@ -3078,7 +3078,8 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
                                                    SourceLocation());
     BinaryOperator *lessThanExpr = 
       new (Context) BinaryOperator(sizeofExpr, limit, BO_LE, Context->IntTy,
-                                   VK_RValue, OK_Ordinary, SourceLocation());
+                                   VK_RValue, OK_Ordinary, SourceLocation(),
+                                   false);
     // (sizeof(returnType) <= 8 ? objc_msgSend(...) : objc_msgSend_stret(...))
     ConditionalOperator *CondExpr =
       new (Context) ConditionalOperator(lessThanExpr,
@@ -4183,7 +4184,7 @@ void RewriteObjC::RewriteBlockPointerDecl(NamedDecl *ND) {
       else if (*argListBegin ==  '<') {
         buf += "/*"; 
         buf += *argListBegin++;
-        OrigLength++;;
+        OrigLength++;
         while (*argListBegin != '>') {
           buf += *argListBegin++;
           OrigLength++;

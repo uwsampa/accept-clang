@@ -16,6 +16,7 @@
 #ifndef LLVM_CLANG_GR_EXPRENGINE
 #define LLVM_CLANG_GR_EXPRENGINE
 
+#include "clang/Analysis/DomainSpecific/ObjCNoReturn.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/AnalysisManager.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/SubEngine.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CoreEngine.h"
@@ -74,13 +75,10 @@ class ExprEngine : public SubEngine {
   const Stmt *currStmt;
   unsigned int currStmtIdx;
   const NodeBuilderContext *currBldrCtx;
-
-  /// Obj-C Class Identifiers.
-  IdentifierInfo* NSExceptionII;
-
-  /// Obj-C Selectors.
-  Selector* NSExceptionInstanceRaiseSelectors;
-  Selector RaiseSel;
+  
+  /// Helper object to determine if an Objective-C message expression
+  /// implicitly never returns.
+  ObjCNoReturn ObjCNoRet;
   
   /// Whether or not GC is enabled in this analysis.
   bool ObjCGCEnabled;
@@ -169,8 +167,12 @@ public:
   /// are usually reported here).
   /// \param K - In some cases it is possible to use PreStmt kind. (Do 
   /// not use it unless you know what you are doing.) 
+  /// If the ReferenceStmt is NULL, everything is this and parent contexts is
+  /// considered live.
+  /// If the stack frame context is NULL, everything on stack is considered
+  /// dead.
   void removeDead(ExplodedNode *Node, ExplodedNodeSet &Out,
-            const Stmt *ReferenceStmt, const LocationContext *LC,
+            const Stmt *ReferenceStmt, const StackFrameContext *LC,
             const Stmt *DiagnosticStmt,
             ProgramPoint::Kind K = ProgramPoint::PreStmtPurgeDeadSymbolsKind);
 
@@ -196,7 +198,8 @@ public:
 
   /// Called by CoreEngine when processing the entrance of a CFGBlock.
   virtual void processCFGBlockEntrance(const BlockEdge &L,
-                                       NodeBuilderWithSinks &nodeBuilder);
+                                       NodeBuilderWithSinks &nodeBuilder,
+                                       ExplodedNode *Pred);
   
   /// ProcessBranch - Called by CoreEngine.  Used to generate successor
   ///  nodes by processing the 'effects' of a branch condition.
@@ -217,7 +220,13 @@ public:
 
   /// ProcessEndPath - Called by CoreEngine.  Used to generate end-of-path
   ///  nodes when the control reaches the end of a function.
-  void processEndOfFunction(NodeBuilderContext& BC);
+  void processEndOfFunction(NodeBuilderContext& BC,
+                            ExplodedNode *Pred);
+
+  /// Remove dead bindings/symbols before exiting a function.
+  void removeDeadOnEndOfFunction(NodeBuilderContext& BC,
+                                 ExplodedNode *Pred,
+                                 ExplodedNodeSet &Dst);
 
   /// Generate the entry node of the callee.
   void processCallEnter(CallEnter CE, ExplodedNode *Pred);
@@ -260,9 +269,6 @@ public:
 
   // FIXME: Remove when we migrate over to just using SValBuilder.
   BasicValueFactory& getBasicVals() {
-    return StateMgr.getBasicVals();
-  }
-  const BasicValueFactory& getBasicVals() const {
     return StateMgr.getBasicVals();
   }
 
@@ -496,6 +502,10 @@ private:
                     ProgramStateRef St, SVal location,
                     const ProgramPointTag *tag, bool isLoad);
 
+  /// Count the stack depth and determine if the call is recursive.
+  void examineStackFrames(const Decl *D, const LocationContext *LCtx,
+                          bool &IsRecursive, unsigned &StackDepth);
+
   bool shouldInlineDecl(const Decl *D, ExplodedNode *Pred);
   bool inlineCall(const CallEvent &Call, const Decl *D, NodeBuilder &Bldr,
                   ExplodedNode *Pred, ProgramStateRef State);
@@ -516,6 +526,8 @@ private:
 
 /// Traits for storing the call processing policy inside GDM.
 /// The GDM stores the corresponding CallExpr pointer.
+// FIXME: This does not use the nice trait macros because it must be accessible
+// from multiple translation units.
 struct ReplayWithoutInlining{};
 template <>
 struct ProgramStateTrait<ReplayWithoutInlining> :

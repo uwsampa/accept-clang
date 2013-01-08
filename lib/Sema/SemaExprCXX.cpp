@@ -410,33 +410,13 @@ Sema::ActOnCXXTypeid(SourceLocation OpLoc, SourceLocation LParenLoc,
   return BuildCXXTypeId(TypeInfoType, OpLoc, (Expr*)TyOrExpr, RParenLoc);
 }
 
-/// Retrieve the UuidAttr associated with QT.
-static UuidAttr *GetUuidAttrOfType(QualType QT) {
-  // Optionally remove one level of pointer, reference or array indirection.
-  const Type *Ty = QT.getTypePtr();;
-  if (QT->isPointerType() || QT->isReferenceType())
-    Ty = QT->getPointeeType().getTypePtr();
-  else if (QT->isArrayType())
-    Ty = cast<ArrayType>(QT)->getElementType().getTypePtr();
-
-  // Loop all record redeclaration looking for an uuid attribute.
-  CXXRecordDecl *RD = Ty->getAsCXXRecordDecl();
-  for (CXXRecordDecl::redecl_iterator I = RD->redecls_begin(),
-       E = RD->redecls_end(); I != E; ++I) {
-    if (UuidAttr *Uuid = I->getAttr<UuidAttr>())
-      return Uuid;
-  }
-
-  return 0;
-}
-
 /// \brief Build a Microsoft __uuidof expression with a type operand.
 ExprResult Sema::BuildCXXUuidof(QualType TypeInfoType,
                                 SourceLocation TypeidLoc,
                                 TypeSourceInfo *Operand,
                                 SourceLocation RParenLoc) {
   if (!Operand->getType()->isDependentType()) {
-    if (!GetUuidAttrOfType(Operand->getType()))
+    if (!CXXUuidofExpr::GetUuidAttrOfType(Operand->getType()))
       return ExprError(Diag(TypeidLoc, diag::err_uuidof_without_guid));
   }
 
@@ -452,7 +432,7 @@ ExprResult Sema::BuildCXXUuidof(QualType TypeInfoType,
                                 Expr *E,
                                 SourceLocation RParenLoc) {
   if (!E->getType()->isDependentType()) {
-    if (!GetUuidAttrOfType(E->getType()) &&
+    if (!CXXUuidofExpr::GetUuidAttrOfType(E->getType()) &&
         !E->isNullPointerConstant(Context, Expr::NPC_ValueDependentIsNull))
       return ExprError(Diag(TypeidLoc, diag::err_uuidof_without_guid));
   }
@@ -1007,7 +987,7 @@ Sema::ActOnCXXNew(SourceLocation StartLoc, bool UseGlobal,
   if (ParenListExpr *List = dyn_cast_or_null<ParenListExpr>(Initializer))
     DirectInitRange = List->getSourceRange();
 
-  return BuildCXXNew(StartLoc, UseGlobal,
+  return BuildCXXNew(SourceRange(StartLoc, D.getLocEnd()), UseGlobal,
                      PlacementLParen,
                      PlacementArgs,
                      PlacementRParen,
@@ -1040,7 +1020,7 @@ static bool isLegalArrayNewInitializer(CXXNewExpr::InitializationStyle Style,
 }
 
 ExprResult
-Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
+Sema::BuildCXXNew(SourceRange Range, bool UseGlobal,
                   SourceLocation PlacementLParen,
                   MultiExprArg PlacementArgs,
                   SourceLocation PlacementRParen,
@@ -1052,6 +1032,7 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
                   Expr *Initializer,
                   bool TypeMayContainAuto) {
   SourceRange TypeRange = AllocTypeInfo->getTypeLoc().getSourceRange();
+  SourceLocation StartLoc = Range.getBegin();
 
   CXXNewExpr::InitializationStyle initStyle;
   if (DirectInitRange.isValid()) {
@@ -1275,14 +1256,6 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
       }
     }
 
-    // ARC: warn about ABI issues.
-    if (getLangOpts().ObjCAutoRefCount) {
-      QualType BaseAllocType = Context.getBaseElementType(AllocType);
-      if (BaseAllocType.hasStrongOrWeakObjCLifetime())
-        Diag(StartLoc, diag::warn_err_new_delete_object_array)
-          << 0 << BaseAllocType;
-    }
-
     // Note that we do *not* convert the argument in any way.  It can
     // be signed, larger than size_t, whatever.
   }
@@ -1435,7 +1408,7 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
                                         TypeIdParens,
                                         ArraySize, initStyle, Initializer,
                                         ResultType, AllocTypeInfo,
-                                        StartLoc, DirectInitRange));
+                                        Range, DirectInitRange));
 }
 
 /// \brief Checks that a type is suitable as the allocated type
@@ -1633,7 +1606,7 @@ bool Sema::FindAllocationFunctions(SourceLocation StartLoc, SourceRange Range,
             = dyn_cast<FunctionTemplateDecl>((*D)->getUnderlyingDecl())) {
         // Perform template argument deduction to try to match the
         // expected function type.
-        TemplateDeductionInfo Info(Context, StartLoc);
+        TemplateDeductionInfo Info(StartLoc);
         if (DeduceTemplateArguments(FnTmpl, 0, ExpectedFunctionType, Fn, Info))
           continue;
       } else
@@ -2206,13 +2179,6 @@ Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
         }
       }
 
-    } else if (getLangOpts().ObjCAutoRefCount &&
-               PointeeElem->isObjCLifetimeType() &&
-               (PointeeElem.getObjCLifetime() == Qualifiers::OCL_Strong ||
-                PointeeElem.getObjCLifetime() == Qualifiers::OCL_Weak) &&
-               ArrayForm) {
-      Diag(StartLoc, diag::warn_err_new_delete_object_array)
-        << 1 << PointeeElem;
     }
 
     if (!OperatorDelete) {
@@ -2593,8 +2559,16 @@ Sema::PerformImplicitConversion(Expr *From, QualType ToType,
 
   case ICK_Integral_Promotion:
   case ICK_Integral_Conversion:
-    From = ImpCastExprToType(From, ToType, CK_IntegralCast, 
-                             VK_RValue, /*BasePath=*/0, CCK).take();
+    if (ToType->isBooleanType()) {
+      assert(FromType->castAs<EnumType>()->getDecl()->isFixed() &&
+             SCS.Second == ICK_Integral_Promotion &&
+             "only enums with fixed underlying type can promote to bool");
+      From = ImpCastExprToType(From, ToType, CK_IntegralToBoolean,
+                               VK_RValue, /*BasePath=*/0, CCK).take();
+    } else {
+      From = ImpCastExprToType(From, ToType, CK_IntegralCast,
+                               VK_RValue, /*BasePath=*/0, CCK).take();
+    }
     break;
 
   case ICK_Floating_Promotion:
@@ -2934,6 +2908,7 @@ static bool CheckUnaryTypeTraitTypeCompleteness(Sema &S,
   case UTT_IsEmpty:
   case UTT_IsPolymorphic:
   case UTT_IsAbstract:
+  case UTT_IsInterfaceClass:
     // Fall-through
 
   // These traits require a complete type.
@@ -3063,6 +3038,10 @@ static bool EvaluateUnaryTypeTrait(Sema &Self, UnaryTypeTrait UTT,
   case UTT_IsAbstract:
     if (const CXXRecordDecl *RD = T->getAsCXXRecordDecl())
       return RD->isAbstract();
+    return false;
+  case UTT_IsInterfaceClass:
+    if (const CXXRecordDecl *RD = T->getAsCXXRecordDecl())
+      return RD->isInterface();
     return false;
   case UTT_IsFinal:
     if (const CXXRecordDecl *RD = T->getAsCXXRecordDecl())
@@ -4149,6 +4128,9 @@ QualType Sema::CXXCheckConditionalOperands(ExprResult &Cond, ExprResult &LHS,
     ExprResult &NonVoid = LVoid ? RHS : LHS;
     if (NonVoid.get()->getType()->isRecordType() &&
         NonVoid.get()->isGLValue()) {
+      if (RequireNonAbstractType(QuestionLoc, NonVoid.get()->getType(),
+                             diag::err_allocation_of_abstract_type))
+        return QualType();
       InitializedEntity Entity =
           InitializedEntity::InitializeTemporary(NonVoid.get()->getType());
       NonVoid = PerformCopyInitialization(Entity, SourceLocation(), NonVoid);
@@ -4291,7 +4273,11 @@ QualType Sema::CXXCheckConditionalOperands(ExprResult &Cond, ExprResult &LHS,
   if (Context.getCanonicalType(LTy) == Context.getCanonicalType(RTy)) {
     if (LTy->isRecordType()) {
       // The operands have class type. Make a temporary copy.
+      if (RequireNonAbstractType(QuestionLoc, LTy,
+                                 diag::err_allocation_of_abstract_type))
+        return QualType();
       InitializedEntity Entity = InitializedEntity::InitializeTemporary(LTy);
+
       ExprResult LHSCopy = PerformCopyInitialization(Entity,
                                                      SourceLocation(),
                                                      LHS);
@@ -4828,7 +4814,8 @@ ExprResult Sema::ActOnDecltypeExpression(Expr *E) {
                                                 BO_Comma, BO->getType(),
                                                 BO->getValueKind(),
                                                 BO->getObjectKind(),
-                                                BO->getOperatorLoc()));
+                                                BO->getOperatorLoc(),
+                                                BO->isFPContractable()));
     }
   }
 
@@ -5045,7 +5032,8 @@ ExprResult Sema::BuildPseudoDestructorExpr(Expr *Base,
   if (CheckArrow(*this, ObjectType, Base, OpKind, OpLoc))
     return ExprError();
 
-  if (!ObjectType->isDependentType() && !ObjectType->isScalarType()) {
+  if (!ObjectType->isDependentType() && !ObjectType->isScalarType() &&
+      !ObjectType->isVectorType()) {
     if (getLangOpts().MicrosoftMode && ObjectType->isVoidType())
       Diag(OpLoc, diag::ext_pseudo_dtor_on_void) << Base->getSourceRange();
     else

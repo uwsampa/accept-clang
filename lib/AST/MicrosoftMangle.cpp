@@ -20,6 +20,7 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/Basic/ABI.h"
+#include "clang/Basic/DiagnosticOptions.h"
 
 #include <map>
 
@@ -96,6 +97,7 @@ private:
   void mangleFunctionClass(const FunctionDecl *FD);
   void mangleCallingConvention(const FunctionType *T, bool IsInstMethod = false);
   void mangleIntegerLiteral(QualType T, const llvm::APSInt &Number);
+  void mangleExpression(const Expr *E);
   void mangleThrowSpecification(const FunctionProtoType *T);
 
   void mangleTemplateArgs(
@@ -305,39 +307,23 @@ void MicrosoftCXXNameMangler::mangleName(const NamedDecl *ND) {
 }
 
 void MicrosoftCXXNameMangler::mangleNumber(int64_t Number) {
-  // <number> ::= [?] <decimal digit> # 1 <= Number <= 10
-  //          ::= [?] <hex digit>+ @ # 0 or > 9; A = 0, B = 1, etc...
-  //          ::= [?] @ # 0 (alternate mangling, not emitted by VC)
-  if (Number < 0) {
-    Out << '?';
-    Number = -Number;
-  }
-  // There's a special shorter mangling for 0, but Microsoft
-  // chose not to use it. Instead, 0 gets mangled as "A@". Oh well...
-  if (Number >= 1 && Number <= 10)
-    Out << Number-1;
-  else {
-    // We have to build up the encoding in reverse order, so it will come
-    // out right when we write it out.
-    char Encoding[16];
-    char *EndPtr = Encoding+sizeof(Encoding);
-    char *CurPtr = EndPtr;
-    do {
-      *--CurPtr = 'A' + (Number % 16);
-      Number /= 16;
-    } while (Number);
-    Out.write(CurPtr, EndPtr-CurPtr);
-    Out << '@';
-  }
+  llvm::APSInt APSNumber(/*BitWidth=*/64, /*isUnsigned=*/false);
+  APSNumber = Number;
+  mangleNumber(APSNumber);
 }
 
 void MicrosoftCXXNameMangler::mangleNumber(const llvm::APSInt &Value) {
+  // <number> ::= [?] <decimal digit> # 1 <= Number <= 10
+  //          ::= [?] <hex digit>+ @ # 0 or > 9; A = 0, B = 1, etc...
+  //          ::= [?] @ # 0 (alternate mangling, not emitted by VC)
   if (Value.isSigned() && Value.isNegative()) {
     Out << '?';
     mangleNumber(llvm::APSInt(Value.abs()));
     return;
   }
   llvm::APSInt Temp(Value);
+  // There's a special shorter mangling for 0, but Microsoft
+  // chose not to use it. Instead, 0 gets mangled as "A@". Oh well...
   if (Value.uge(1) && Value.ule(10)) {
     --Temp;
     Temp.print(Out, false);
@@ -349,10 +335,10 @@ void MicrosoftCXXNameMangler::mangleNumber(const llvm::APSInt &Value) {
     char *CurPtr = EndPtr;
     llvm::APSInt NibbleMask(Value.getBitWidth(), Value.isUnsigned());
     NibbleMask = 0xf;
-    for (int i = 0, e = Value.getActiveBits() / 4; i != e; ++i) {
+    do {
       *--CurPtr = 'A' + Temp.And(NibbleMask).getLimitedValue(0xf);
       Temp = Temp.lshr(4);
-    }
+    } while (Temp != 0);
     Out.write(CurPtr, EndPtr-CurPtr);
     Out << '@';
   }
@@ -387,7 +373,7 @@ isTemplate(const NamedDecl *ND,
       dyn_cast<ClassTemplateSpecializationDecl>(ND)) {
     TypeSourceInfo *TSI = Spec->getTypeAsWritten();
     if (TSI) {
-      TemplateSpecializationTypeLoc &TSTL =
+      TemplateSpecializationTypeLoc TSTL =
         cast<TemplateSpecializationTypeLoc>(TSI->getTypeLoc());
       TemplateArgumentListInfo LI(TSTL.getLAngleLoc(), TSTL.getRAngleLoc());
       for (unsigned i = 0, e = TSTL.getNumArgs(); i != e; ++i)
@@ -785,6 +771,23 @@ MicrosoftCXXNameMangler::mangleIntegerLiteral(QualType T,
 }
 
 void
+MicrosoftCXXNameMangler::mangleExpression(const Expr *E) {
+  // See if this is a constant expression.
+  llvm::APSInt Value;
+  if (E->isIntegerConstantExpr(Value, Context.getASTContext())) {
+    mangleIntegerLiteral(E->getType(), Value);
+    return;
+  }
+
+  // As bad as this diagnostic is, it's better than crashing.
+  DiagnosticsEngine &Diags = Context.getDiags();
+  unsigned DiagID = Diags.getCustomDiagID(DiagnosticsEngine::Error,
+                                   "cannot yet mangle expression type %0");
+  Diags.Report(E->getExprLoc(), DiagID)
+    << E->getStmtClassName() << E->getSourceRange();
+}
+
+void
 MicrosoftCXXNameMangler::mangleTemplateArgs(
                      const SmallVectorImpl<TemplateArgumentLoc> &TemplateArgs) {
   // <template-args> ::= {<type> | <integer-literal>}+ @
@@ -801,21 +804,19 @@ MicrosoftCXXNameMangler::mangleTemplateArgs(
     case TemplateArgument::Integral:
       mangleIntegerLiteral(TA.getIntegralType(), TA.getAsIntegral());
       break;
-    case TemplateArgument::Expression: {
-      // See if this is a constant expression.
-      Expr *TAE = TA.getAsExpr();
-      llvm::APSInt Value;
-      if (TAE->isIntegerConstantExpr(Value, Context.getASTContext())) {
-        mangleIntegerLiteral(TAE->getType(), Value);
-        break;
-      }
-      /* fallthrough */
-    } default: {
+    case TemplateArgument::Expression:
+      mangleExpression(TA.getAsExpr());
+      break;
+    case TemplateArgument::Template:
+    case TemplateArgument::TemplateExpansion:
+    case TemplateArgument::Declaration:
+    case TemplateArgument::NullPtr:
+    case TemplateArgument::Pack: {
       // Issue a diagnostic.
       DiagnosticsEngine &Diags = Context.getDiags();
       unsigned DiagID = Diags.getCustomDiagID(DiagnosticsEngine::Error,
-        "cannot mangle this %select{ERROR|ERROR|pointer/reference|ERROR|"
-        "template|template pack expansion|expression|parameter pack}0 "
+        "cannot mangle this %select{ERROR|ERROR|pointer/reference|nullptr|"
+        "integral|template|template pack expansion|ERROR|parameter pack}0 "
         "template argument yet");
       Diags.Report(TAL.getLocation(), DiagID)
         << TA.getKind()

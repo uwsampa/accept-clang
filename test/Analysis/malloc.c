@@ -1,5 +1,7 @@
 // RUN: %clang_cc1 -analyze -analyzer-checker=core,alpha.deadcode.UnreachableCode,alpha.core.CastSize,unix.Malloc,debug.ExprInspection -analyzer-store=region -verify %s
-#include "system-header-simulator.h"
+// REQUIRES: LP64
+
+#include "Inputs/system-header-simulator.h"
 
 void clang_analyzer_eval(int);
 
@@ -1018,6 +1020,16 @@ int reallocButNoMallocPR13674(struct HasPtr *a, int c, int size) {
     return -1;
   a->p = b;
   return 0;
+}
+
+// Test realloc with no visible malloc.
+void *test(void *ptr) {
+  void *newPtr = realloc(ptr, 4);
+  if (newPtr == 0) {
+    if (ptr)
+      free(ptr); // no-warning
+  }
+  return newPtr;
 }
 
 // ----------------------------------------------------------------------------

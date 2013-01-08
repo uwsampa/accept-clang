@@ -14,6 +14,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/StaticAnalyzer/Core/PathSensitive/CallEvent.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/CheckerContext.h"
 #include "clang/Analysis/ProgramPoint.h"
 #include "clang/AST/ParentMap.h"
 #include "llvm/ADT/SmallSet.h"
@@ -97,6 +98,14 @@ bool CallEvent::hasNonZeroCallbackArg() const {
   }
   
   return false;
+}
+
+bool CallEvent::isGlobalCFunction(StringRef FunctionName) const {
+  const FunctionDecl *FD = dyn_cast_or_null<FunctionDecl>(getDecl());
+  if (!FD)
+    return false;
+
+  return CheckerContext::isCLibraryFunction(FD, FunctionName);
 }
 
 /// \brief Returns true if a type is a pointer-to-const or reference-to-const
@@ -223,6 +232,13 @@ SourceRange CallEvent::getArgSourceRange(unsigned Index) const {
   return ArgE->getSourceRange();
 }
 
+SVal CallEvent::getReturnValue() const {
+  const Expr *E = getOriginExpr();
+  if (!E)
+    return UndefinedVal();
+  return getSVal(E);
+}
+
 void CallEvent::dump() const {
   dump(llvm::errs());
 }
@@ -250,6 +266,16 @@ bool CallEvent::isCallStmt(const Stmt *S) {
   return isa<CallExpr>(S) || isa<ObjCMessageExpr>(S)
                           || isa<CXXConstructExpr>(S)
                           || isa<CXXNewExpr>(S);
+}
+
+/// \brief Returns the result type, adjusted for references.
+QualType CallEvent::getDeclaredResultType(const Decl *D) {
+  assert(D);
+  if (const FunctionDecl* FD = dyn_cast<FunctionDecl>(D))
+    return FD->getResultType();
+  else if (const ObjCMethodDecl* MD = dyn_cast<ObjCMethodDecl>(D))
+    return MD->getResultType();
+  return QualType();
 }
 
 static void addParameterValuesToBindings(const StackFrameContext *CalleeCtx,
@@ -311,7 +337,7 @@ bool AnyFunctionCall::argumentsMayEscape() const {
 
   const IdentifierInfo *II = D->getIdentifier();
   if (!II)
-    return true;
+    return false;
 
   // This set of "escaping" APIs is 
 
@@ -391,15 +417,7 @@ SVal CXXInstanceCall::getCXXThisVal() const {
     return UnknownVal();
 
   SVal ThisVal = getSVal(Base);
-
-  // FIXME: This is only necessary because we can call member functions on
-  // struct rvalues, which do not have regions we can use for a 'this' pointer.
-  // Ideally this should eventually be changed to an assert, i.e. all
-  // non-Unknown, non-null 'this' values should be loc::MemRegionVals.
-  if (isa<DefinedSVal>(ThisVal))
-    if (!ThisVal.getAsRegion() && !ThisVal.isConstant())
-      return UnknownVal();
-
+  assert(ThisVal.isUnknownOrUndef() || isa<Loc>(ThisVal));
   return ThisVal;
 }
 
@@ -440,8 +458,15 @@ RuntimeDefinition CXXInstanceCall::getRuntimeDefinition() const {
     // some particularly nasty casting (e.g. casts to sister classes).
     // However, we should at least be able to search up and down our own class
     // hierarchy, and some real bugs have been caught by checking this.
-    assert(!MD->getParent()->isDerivedFrom(RD) && "Bad DynamicTypeInfo");
     assert(!RD->isDerivedFrom(MD->getParent()) && "Couldn't find known method");
+    
+    // FIXME: This is checking that our DynamicTypeInfo is at least as good as
+    // the static type. However, because we currently don't update
+    // DynamicTypeInfo when an object is cast, we can't actually be sure the
+    // DynamicTypeInfo is up to date. This assert should be re-enabled once
+    // this is fixed. <rdar://problem/12287087>
+    //assert(!MD->getParent()->isDerivedFrom(RD) && "Bad DynamicTypeInfo");
+
     return RuntimeDefinition();
   }
 
@@ -494,6 +519,18 @@ void CXXInstanceCall::getInitialStackFrameContents(
 
 const Expr *CXXMemberCall::getCXXThisExpr() const {
   return getOriginExpr()->getImplicitObjectArgument();
+}
+
+RuntimeDefinition CXXMemberCall::getRuntimeDefinition() const {
+  // C++11 [expr.call]p1: ...If the selected function is non-virtual, or if the
+  // id-expression in the class member access expression is a qualified-id,
+  // that function is called. Otherwise, its final overrider in the dynamic type
+  // of the object expression is called.
+  if (const MemberExpr *ME = dyn_cast<MemberExpr>(getOriginExpr()->getCallee()))
+    if (ME->hasQualifier())
+      return AnyFunctionCall::getRuntimeDefinition();
+  
+  return CXXInstanceCall::getRuntimeDefinition();
 }
 
 

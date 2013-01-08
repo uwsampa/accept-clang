@@ -1,10 +1,9 @@
-set(LLVM_REQUIRES_EH 1)
-set(LLVM_REQUIRES_RTTI 1)
 set(LLVM_LINK_COMPONENTS Support)
 
 add_tablegen(clang-tblgen CLANG
   ClangASTNodesEmitter.cpp
   ClangAttrEmitter.cpp
+  ClangCommentCommandInfoEmitter.cpp
   ClangCommentHTMLTagsEmitter.cpp
   ClangDiagnosticsEmitter.cpp
   ClangSACheckersEmitter.cpp

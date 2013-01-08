@@ -48,6 +48,75 @@ const CXXRecordDecl *Expr::getBestDynamicClassType() const {
   return cast<CXXRecordDecl>(D);
 }
 
+const Expr *
+Expr::skipRValueSubobjectAdjustments(
+                     SmallVectorImpl<SubobjectAdjustment> &Adjustments) const  {
+  const Expr *E = this;
+  while (true) {
+    E = E->IgnoreParens();
+
+    if (const CastExpr *CE = dyn_cast<CastExpr>(E)) {
+      if ((CE->getCastKind() == CK_DerivedToBase ||
+           CE->getCastKind() == CK_UncheckedDerivedToBase) &&
+          E->getType()->isRecordType()) {
+        E = CE->getSubExpr();
+        CXXRecordDecl *Derived
+          = cast<CXXRecordDecl>(E->getType()->getAs<RecordType>()->getDecl());
+        Adjustments.push_back(SubobjectAdjustment(CE, Derived));
+        continue;
+      }
+
+      if (CE->getCastKind() == CK_NoOp) {
+        E = CE->getSubExpr();
+        continue;
+      }
+    } else if (const MemberExpr *ME = dyn_cast<MemberExpr>(E)) {
+      if (!ME->isArrow() && ME->getBase()->isRValue()) {
+        assert(ME->getBase()->getType()->isRecordType());
+        if (FieldDecl *Field = dyn_cast<FieldDecl>(ME->getMemberDecl())) {
+          E = ME->getBase();
+          Adjustments.push_back(SubobjectAdjustment(Field));
+          continue;
+        }
+      }
+    } else if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(E)) {
+      if (BO->isPtrMemOp()) {
+        assert(BO->getRHS()->isRValue());
+        E = BO->getLHS();
+        const MemberPointerType *MPT =
+          BO->getRHS()->getType()->getAs<MemberPointerType>();
+        Adjustments.push_back(SubobjectAdjustment(MPT, BO->getRHS()));
+      }
+    }
+
+    // Nothing changed.
+    break;
+  }
+  return E;
+}
+
+const Expr *
+Expr::findMaterializedTemporary(const MaterializeTemporaryExpr *&MTE) const {
+  const Expr *E = this;
+  // Look through single-element init lists that claim to be lvalues. They're
+  // just syntactic wrappers in this case.
+  if (const InitListExpr *ILE = dyn_cast<InitListExpr>(E)) {
+    if (ILE->getNumInits() == 1 && ILE->isGLValue())
+      E = ILE->getInit(0);
+  }
+
+  // Look through expressions for materialized temporaries (for now).
+  if (const MaterializeTemporaryExpr *M
+      = dyn_cast<MaterializeTemporaryExpr>(E)) {
+    MTE = M;
+    E = M->GetTemporaryExpr();
+  }
+
+  if (const CXXDefaultArgExpr *DAE = dyn_cast<CXXDefaultArgExpr>(E))
+    E = DAE->getExpr();
+  return E;
+}
+
 /// isKnownToHaveBooleanValue - Return true if this is an integer expression
 /// that is known to return 0 or 1.  This happens for _Bool/bool expressions
 /// but also int expressions which are produced by things like comparisons in
@@ -784,19 +853,19 @@ void StringLiteral::setString(ASTContext &C, StringRef Str,
   switch(CharByteWidth) {
     case 1: {
       char *AStrData = new (C) char[Length];
-      std::memcpy(AStrData,Str.data(),Str.size());
+      std::memcpy(AStrData,Str.data(),Length*sizeof(*AStrData));
       StrData.asChar = AStrData;
       break;
     }
     case 2: {
       uint16_t *AStrData = new (C) uint16_t[Length];
-      std::memcpy(AStrData,Str.data(),Str.size());
+      std::memcpy(AStrData,Str.data(),Length*sizeof(*AStrData));
       StrData.asUInt16 = AStrData;
       break;
     }
     case 4: {
       uint32_t *AStrData = new (C) uint32_t[Length];
-      std::memcpy(AStrData,Str.data(),Str.size());
+      std::memcpy(AStrData,Str.data(),Length*sizeof(*AStrData));
       StrData.asUInt32 = AStrData;
       break;
     }
@@ -869,7 +938,7 @@ getLocationOfByte(unsigned ByteNo, const SourceManager &SM,
 
 /// getOpcodeStr - Turn an Opcode enum value into the punctuation char it
 /// corresponds to, e.g. "sizeof" or "[pre]++".
-const char *UnaryOperator::getOpcodeStr(Opcode Op) {
+StringRef UnaryOperator::getOpcodeStr(Opcode Op) {
   switch (Op) {
   case UO_PostInc: return "++";
   case UO_PostDec: return "--";
@@ -1258,9 +1327,12 @@ SourceLocation MemberExpr::getLocStart() const {
   return MemberLoc;
 }
 SourceLocation MemberExpr::getLocEnd() const {
+  SourceLocation EndLoc = getMemberNameInfo().getEndLoc();
   if (hasExplicitTemplateArgs())
-    return getRAngleLoc();
-  return getMemberNameInfo().getEndLoc();
+    EndLoc = getRAngleLoc();
+  else if (EndLoc.isInvalid())
+    EndLoc = getBase()->getLocEnd();
+  return EndLoc;
 }
 
 void CastExpr::CheckCastConsistency() const {
@@ -1570,7 +1642,7 @@ CStyleCastExpr *CStyleCastExpr::CreateEmpty(ASTContext &C, unsigned PathSize) {
 
 /// getOpcodeStr - Turn an Opcode enum value into the punctuation char it
 /// corresponds to, e.g. "<<=".
-const char *BinaryOperator::getOpcodeStr(Opcode Op) {
+StringRef BinaryOperator::getOpcodeStr(Opcode Op) {
   switch (Op) {
   case BO_PtrMemD:   return ".*";
   case BO_PtrMemI:   return "->*";
@@ -1676,7 +1748,7 @@ InitListExpr::InitListExpr(ASTContext &C, SourceLocation lbraceloc,
   : Expr(InitListExprClass, QualType(), VK_RValue, OK_Ordinary, false, false,
          false, false),
     InitExprs(C, initExprs.size()),
-    LBraceLoc(lbraceloc), RBraceLoc(rbraceloc), SyntacticForm(0)
+    LBraceLoc(lbraceloc), RBraceLoc(rbraceloc), AltForm(0, true)
 {
   sawArrayRangeDesignator(false);
   setInitializesStdInitializerList(false);
@@ -1736,7 +1808,7 @@ bool InitListExpr::isStringLiteralInit() const {
 }
 
 SourceRange InitListExpr::getSourceRange() const {
-  if (SyntacticForm)
+  if (InitListExpr *SyntacticForm = getSyntacticForm())
     return SyntacticForm->getSourceRange();
   SourceLocation Beg = LBraceLoc, End = RBraceLoc;
   if (Beg.isInvalid()) {
@@ -1950,6 +2022,11 @@ bool Expr::isUnusedResultAWarning(const Expr *&WarnE, SourceLocation &Loc,
     return false;
   }
 
+  // If we don't know precisely what we're looking at, let's not warn.
+  case UnresolvedLookupExprClass:
+  case CXXUnresolvedConstructExprClass:
+    return false;
+
   case CXXTemporaryObjectExprClass:
   case CXXConstructExprClass:
     return false;
@@ -2019,6 +2096,7 @@ bool Expr::isUnusedResultAWarning(const Expr *&WarnE, SourceLocation &Loc,
     R1 = getSourceRange();
     return true;
   }
+  case CXXFunctionalCastExprClass:
   case CStyleCastExprClass: {
     // Ignore an explicit cast to void unless the operand is a non-trivial
     // volatile lvalue.
@@ -2036,6 +2114,10 @@ bool Expr::isUnusedResultAWarning(const Expr *&WarnE, SourceLocation &Loc,
       }
       return false;
     }
+
+    // Ignore casts within macro expansions.
+    if (getExprLoc().isMacroID())
+      return CE->getSubExpr()->isUnusedResultAWarning(WarnE, Loc, R1, R2, Ctx);
 
     // If this is a cast to a constructor conversion, check the operand.
     // Otherwise, the result of the cast is unused.
@@ -2646,6 +2728,7 @@ bool Expr::HasSideEffects(const ASTContext &Ctx) const {
   case UnresolvedMemberExprClass:
   case PackExpansionExprClass:
   case SubstNonTypeTemplateParmPackExprClass:
+  case FunctionParmPackExprClass:
     llvm_unreachable("shouldn't see dependent / unresolved nodes here");
 
   case DeclRefExprClass:
@@ -3000,6 +3083,24 @@ const ObjCPropertyRefExpr *Expr::getObjCProperty() const {
   return cast<ObjCPropertyRefExpr>(E);
 }
 
+bool Expr::isObjCSelfExpr() const {
+  const Expr *E = IgnoreParenImpCasts();
+
+  const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E);
+  if (!DRE)
+    return false;
+
+  const ImplicitParamDecl *Param = dyn_cast<ImplicitParamDecl>(DRE->getDecl());
+  if (!Param)
+    return false;
+
+  const ObjCMethodDecl *M = dyn_cast<ObjCMethodDecl>(Param->getDeclContext());
+  if (!M)
+    return false;
+
+  return M->getSelfDecl() == Param;
+}
+
 FieldDecl *Expr::getBitField() {
   Expr *E = this->IgnoreParens();
 
@@ -3344,32 +3445,28 @@ Selector ObjCMessageExpr::getSelector() const {
   return Selector(SelectorOrMethod); 
 }
 
-ObjCInterfaceDecl *ObjCMessageExpr::getReceiverInterface() const {
+QualType ObjCMessageExpr::getReceiverType() const {
   switch (getReceiverKind()) {
   case Instance:
-    if (const ObjCObjectPointerType *Ptr
-          = getInstanceReceiver()->getType()->getAs<ObjCObjectPointerType>())
-      return Ptr->getInterfaceDecl();
-    break;
-
+    return getInstanceReceiver()->getType();
   case Class:
-    if (const ObjCObjectType *Ty
-          = getClassReceiver()->getAs<ObjCObjectType>())
-      return Ty->getInterface();
-    break;
-
+    return getClassReceiver();
   case SuperInstance:
-    if (const ObjCObjectPointerType *Ptr
-          = getSuperType()->getAs<ObjCObjectPointerType>())
-      return Ptr->getInterfaceDecl();
-    break;
-
   case SuperClass:
-    if (const ObjCObjectType *Iface
-          = getSuperType()->getAs<ObjCObjectType>())
-      return Iface->getInterface();
-    break;
+    return getSuperType();
   }
+
+  llvm_unreachable("unexpected receiver kind");
+}
+
+ObjCInterfaceDecl *ObjCMessageExpr::getReceiverInterface() const {
+  QualType T = getReceiverType();
+
+  if (const ObjCObjectPointerType *Ptr = T->getAs<ObjCObjectPointerType>())
+    return Ptr->getInterfaceDecl();
+
+  if (const ObjCObjectType *Ty = T->getAs<ObjCObjectType>())
+    return Ty->getInterface();
 
   return 0;
 }

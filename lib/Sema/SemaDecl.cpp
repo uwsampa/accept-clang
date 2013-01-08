@@ -435,7 +435,8 @@ bool Sema::DiagnoseUnknownTypeName(IdentifierInfo *&II,
       else if (DeclContext *DC = computeDeclContext(*SS, false))
         Diag(IILoc, diag::err_unknown_nested_typename_suggest)
           << II << DC << CorrectedQuotedStr << SS->getRange()
-          << FixItHint::CreateReplacement(SourceRange(IILoc), CorrectedStr);
+          << FixItHint::CreateReplacement(Corrected.getCorrectionRange(),
+                                          CorrectedStr);
       else
         llvm_unreachable("could not have corrected a typo here");
 
@@ -684,11 +685,12 @@ Corrected:
           Diag(NameLoc, UnqualifiedDiag)
             << Name << CorrectedQuotedStr
             << FixItHint::CreateReplacement(NameLoc, CorrectedStr);
-        else
+        else // FIXME: is this even reachable? Test it.
           Diag(NameLoc, QualifiedDiag)
             << Name << computeDeclContext(SS, false) << CorrectedQuotedStr
             << SS.getRange()
-            << FixItHint::CreateReplacement(NameLoc, CorrectedStr);
+            << FixItHint::CreateReplacement(Corrected.getCorrectionRange(),
+                                            CorrectedStr);
 
         // Update the name, so that the caller has the new name.
         Name = Corrected.getCorrectionAsIdentifierInfo();
@@ -1202,8 +1204,14 @@ bool Sema::ShouldWarnIfUnusedFileScopedDecl(const DeclaratorDecl *D) const {
         Context.DeclMustBeEmitted(FD))
       return false;
   } else if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
+    // Don't warn on variables of const-qualified or reference type, since their
+    // values can be used even if though they're not odr-used, and because const
+    // qualified variables can appear in headers in contexts where they're not
+    // intended to be used.
+    // FIXME: Use more principled rules for these exemptions.
     if (!VD->isFileVarDecl() ||
-        VD->getType().isConstant(Context) ||
+        VD->getType().isConstQualified() ||
+        VD->getType()->isReferenceType() ||
         Context.DeclMustBeEmitted(VD))
       return false;
 
@@ -1264,7 +1272,7 @@ static bool ShouldDiagnoseUnusedDecl(const NamedDecl *D) {
     QualType Ty = VD->getType();
 
     // Only look at the outermost level of typedef.
-    if (const TypedefType *TT = dyn_cast<TypedefType>(Ty)) {
+    if (const TypedefType *TT = Ty->getAs<TypedefType>()) {
       if (TT->getDecl()->hasAttr<UnusedAttr>())
         return false;
     }
@@ -1284,6 +1292,8 @@ static bool ShouldDiagnoseUnusedDecl(const NamedDecl *D) {
           return false;
 
         if (const Expr *Init = VD->getInit()) {
+          if (const ExprWithCleanups *Cleanups = dyn_cast<ExprWithCleanups>(Init))
+            Init = Cleanups->getSubExpr();
           const CXXConstructExpr *Construct =
             dyn_cast<CXXConstructExpr>(Init);
           if (Construct && !Construct->isElidable()) {
@@ -1721,6 +1731,25 @@ DeclHasAttr(const Decl *D, const Attr *A) {
   const AvailabilityAttr *AA = dyn_cast<AvailabilityAttr>(A);
   if (AA)
     return false;
+
+  // The following thread safety attributes can also be duplicated.
+  switch (A->getKind()) {
+    case attr::ExclusiveLocksRequired:
+    case attr::SharedLocksRequired:
+    case attr::LocksExcluded:
+    case attr::ExclusiveLockFunction:
+    case attr::SharedLockFunction:
+    case attr::UnlockFunction:
+    case attr::ExclusiveTrylockFunction:
+    case attr::SharedTrylockFunction:
+    case attr::GuardedBy:
+    case attr::PtGuardedBy:
+    case attr::AcquiredBefore:
+    case attr::AcquiredAfter:
+      return false;
+    default:
+      ;
+  }
 
   const OwnershipAttr *OA = dyn_cast<OwnershipAttr>(A);
   const AnnotateAttr *Ann = dyn_cast<AnnotateAttr>(A);
@@ -2442,7 +2471,7 @@ void Sema::MergeVarDeclTypes(VarDecl *New, VarDecl *Old) {
   }
   if (MergedT.isNull()) {
     Diag(New->getLocation(), diag::err_redefinition_different_type)
-      << New->getDeclName();
+      << New->getDeclName() << New->getType() << Old->getType();
     Diag(Old->getLocation(), diag::note_previous_definition);
     return New->setInvalidDecl();
   }
@@ -2774,8 +2803,7 @@ Decl *Sema::ParsedFreeStandingDeclSpec(Scope *S, AccessSpecifier AS,
         TypeSpecType == DeclSpec::TST_enum) {
       AttributeList* attrs = DS.getAttributes().getList();
       while (attrs) {
-        Diag(attrs->getScopeLoc(),
-             diag::warn_declspec_attribute_ignored)
+        Diag(attrs->getLoc(), diag::warn_declspec_attribute_ignored)
         << attrs->getName()
         << (TypeSpecType == DeclSpec::TST_class ? 0 :
             TypeSpecType == DeclSpec::TST_struct ? 1 :
@@ -3400,7 +3428,6 @@ static bool RebuildDeclaratorInCurrentInstantiation(Sema &S, Declarator &D,
   switch (DS.getTypeSpecType()) {
   case DeclSpec::TST_typename:
   case DeclSpec::TST_typeofType:
-  case DeclSpec::TST_decltype:
   case DeclSpec::TST_underlyingType:
   case DeclSpec::TST_atomic: {
     // Grab the type from the parser.
@@ -3424,6 +3451,7 @@ static bool RebuildDeclaratorInCurrentInstantiation(Sema &S, Declarator &D,
     break;
   }
 
+  case DeclSpec::TST_decltype:
   case DeclSpec::TST_typeofExpr: {
     Expr *E = DS.getRepAsExpr();
     ExprResult Result = S.RebuildExprInCurrentInstantiation(E);
@@ -3523,7 +3551,8 @@ bool Sema::diagnoseQualifiedDeclaration(CXXScopeSpec &SS, DeclContext *DC,
   //   void X::f();
   // };
   if (Cur->Equals(DC)) {
-    Diag(Loc, diag::warn_member_extra_qualification)
+    Diag(Loc, LangOpts.MicrosoftExt? diag::warn_member_extra_qualification
+                                   : diag::err_member_extra_qualification)
       << Name << FixItHint::CreateRemoval(SS.getRange());
     SS.clear();
     return false;
@@ -3776,9 +3805,9 @@ Decl *Sema::HandleDeclarator(Scope *S, Declarator &D,
   return New;
 }
 
-/// TryToFixInvalidVariablyModifiedType - Helper method to turn variable array
-/// types into constant array types in certain situations which would otherwise
-/// be errors (for GCC compatibility).
+/// Helper method to turn variable array types into constant array
+/// types in certain situations which would otherwise be errors (for
+/// GCC compatibility).
 static QualType TryToFixInvalidVariablyModifiedType(QualType T,
                                                     ASTContext &Context,
                                                     bool &SizeIsNegative,
@@ -3844,6 +3873,52 @@ static QualType TryToFixInvalidVariablyModifiedType(QualType T,
   
   return Context.getConstantArrayType(VLATy->getElementType(),
                                       Res, ArrayType::Normal, 0);
+}
+
+static void
+FixInvalidVariablyModifiedTypeLoc(TypeLoc SrcTL, TypeLoc DstTL) {
+  if (PointerTypeLoc* SrcPTL = dyn_cast<PointerTypeLoc>(&SrcTL)) {
+    PointerTypeLoc* DstPTL = cast<PointerTypeLoc>(&DstTL);
+    FixInvalidVariablyModifiedTypeLoc(SrcPTL->getPointeeLoc(),
+                                      DstPTL->getPointeeLoc());
+    DstPTL->setStarLoc(SrcPTL->getStarLoc());
+    return;
+  }
+  if (ParenTypeLoc* SrcPTL = dyn_cast<ParenTypeLoc>(&SrcTL)) {
+    ParenTypeLoc* DstPTL = cast<ParenTypeLoc>(&DstTL);
+    FixInvalidVariablyModifiedTypeLoc(SrcPTL->getInnerLoc(),
+                                      DstPTL->getInnerLoc());
+    DstPTL->setLParenLoc(SrcPTL->getLParenLoc());
+    DstPTL->setRParenLoc(SrcPTL->getRParenLoc());
+    return;
+  }
+  ArrayTypeLoc* SrcATL = cast<ArrayTypeLoc>(&SrcTL);
+  ArrayTypeLoc* DstATL = cast<ArrayTypeLoc>(&DstTL);
+  TypeLoc SrcElemTL = SrcATL->getElementLoc();
+  TypeLoc DstElemTL = DstATL->getElementLoc();
+  DstElemTL.initializeFullCopy(SrcElemTL);
+  DstATL->setLBracketLoc(SrcATL->getLBracketLoc());
+  DstATL->setSizeExpr(SrcATL->getSizeExpr());
+  DstATL->setRBracketLoc(SrcATL->getRBracketLoc());
+}
+
+/// Helper method to turn variable array types into constant array
+/// types in certain situations which would otherwise be errors (for
+/// GCC compatibility).
+static TypeSourceInfo*
+TryToFixInvalidVariablyModifiedTypeSourceInfo(TypeSourceInfo *TInfo,
+                                              ASTContext &Context,
+                                              bool &SizeIsNegative,
+                                              llvm::APSInt &Oversized) {
+  QualType FixedTy
+    = TryToFixInvalidVariablyModifiedType(TInfo->getType(), Context,
+                                          SizeIsNegative, Oversized);
+  if (FixedTy.isNull())
+    return 0;
+  TypeSourceInfo *FixedTInfo = Context.getTrivialTypeSourceInfo(FixedTy);
+  FixInvalidVariablyModifiedTypeLoc(TInfo->getTypeLoc(),
+                                    FixedTInfo->getTypeLoc());
+  return FixedTInfo;
 }
 
 /// \brief Register the given locally-scoped external C declaration so
@@ -3973,19 +4048,21 @@ Sema::CheckTypedefForVariablyModifiedType(Scope *S, TypedefNameDecl *NewTD) {
   // then it shall have block scope.
   // Note that variably modified types must be fixed before merging the decl so
   // that redeclarations will match.
-  QualType T = NewTD->getUnderlyingType();
+  TypeSourceInfo *TInfo = NewTD->getTypeSourceInfo();
+  QualType T = TInfo->getType();
   if (T->isVariablyModifiedType()) {
     getCurFunction()->setHasBranchProtectedScope();
 
     if (S->getFnParent() == 0) {
       bool SizeIsNegative;
       llvm::APSInt Oversized;
-      QualType FixedTy =
-          TryToFixInvalidVariablyModifiedType(T, Context, SizeIsNegative,
-                                              Oversized);
-      if (!FixedTy.isNull()) {
+      TypeSourceInfo *FixedTInfo =
+        TryToFixInvalidVariablyModifiedTypeSourceInfo(TInfo, Context,
+                                                      SizeIsNegative,
+                                                      Oversized);
+      if (FixedTInfo) {
         Diag(NewTD->getLocation(), diag::warn_illegal_constant_array_size);
-        NewTD->setTypeSourceInfo(Context.getTrivialTypeSourceInfo(FixedTy));
+        NewTD->setTypeSourceInfo(FixedTInfo);
       } else {
         if (SizeIsNegative)
           Diag(NewTD->getLocation(), diag::err_typecheck_negative_array_size);
@@ -4545,7 +4622,8 @@ bool Sema::CheckVariableDeclaration(VarDecl *NewVD,
   if (NewVD->isInvalidDecl())
     return false;
 
-  QualType T = NewVD->getType();
+  TypeSourceInfo *TInfo = NewVD->getTypeSourceInfo();
+  QualType T = TInfo->getType();
 
   if (T->isObjCObjectType()) {
     Diag(NewVD->getLocation(), diag::err_statically_allocated_object)
@@ -4577,8 +4655,10 @@ bool Sema::CheckVariableDeclaration(VarDecl *NewVD,
       && !NewVD->hasAttr<BlocksAttr>()) {
     if (getLangOpts().getGC() != LangOptions::NonGC)
       Diag(NewVD->getLocation(), diag::warn_gc_attribute_weak_on_local);
-    else
+    else {
+      assert(!getLangOpts().ObjCAutoRefCount);
       Diag(NewVD->getLocation(), diag::warn_attribute_weak_on_local);
+    }
   }
   
   bool isVM = T->isVariablyModifiedType();
@@ -4590,11 +4670,10 @@ bool Sema::CheckVariableDeclaration(VarDecl *NewVD,
       (T->isVariableArrayType() && NewVD->hasGlobalStorage())) {
     bool SizeIsNegative;
     llvm::APSInt Oversized;
-    QualType FixedTy =
-        TryToFixInvalidVariablyModifiedType(T, Context, SizeIsNegative,
-                                            Oversized);
-
-    if (FixedTy.isNull() && T->isVariableArrayType()) {
+    TypeSourceInfo *FixedTInfo =
+      TryToFixInvalidVariablyModifiedTypeSourceInfo(TInfo, Context,
+                                                    SizeIsNegative, Oversized);
+    if (FixedTInfo == 0 && T->isVariableArrayType()) {
       const VariableArrayType *VAT = Context.getAsVariableArrayType(T);
       // FIXME: This won't give the correct result for
       // int a[10][n];
@@ -4613,7 +4692,7 @@ bool Sema::CheckVariableDeclaration(VarDecl *NewVD,
       return false;
     }
 
-    if (FixedTy.isNull()) {
+    if (FixedTInfo == 0) {
       if (NewVD->isFileVarDecl())
         Diag(NewVD->getLocation(), diag::err_vm_decl_in_file_scope);
       else
@@ -4623,7 +4702,8 @@ bool Sema::CheckVariableDeclaration(VarDecl *NewVD,
     }
 
     Diag(NewVD->getLocation(), diag::warn_illegal_constant_array_size);
-    NewVD->setType(FixedTy);
+    NewVD->setType(FixedTInfo->getType());
+    NewVD->setTypeSourceInfo(FixedTInfo);
   }
 
   if (Previous.empty() && NewVD->isExternC()) {
@@ -4710,6 +4790,31 @@ static bool FindOverriddenMethod(const CXXBaseSpecifier *Specifier,
   return false;
 }
 
+namespace {
+  enum OverrideErrorKind { OEK_All, OEK_NonDeleted, OEK_Deleted };
+}
+/// \brief Report an error regarding overriding, along with any relevant
+/// overriden methods.
+///
+/// \param DiagID the primary error to report.
+/// \param MD the overriding method.
+/// \param OEK which overrides to include as notes.
+static void ReportOverrides(Sema& S, unsigned DiagID, const CXXMethodDecl *MD,
+                            OverrideErrorKind OEK = OEK_All) {
+  S.Diag(MD->getLocation(), DiagID) << MD->getDeclName();
+  for (CXXMethodDecl::method_iterator I = MD->begin_overridden_methods(),
+                                      E = MD->end_overridden_methods();
+       I != E; ++I) {
+    // This check (& the OEK parameter) could be replaced by a predicate, but
+    // without lambdas that would be overkill. This is still nicer than writing
+    // out the diag loop 3 times.
+    if ((OEK == OEK_All) ||
+        (OEK == OEK_NonDeleted && !(*I)->isDeleted()) ||
+        (OEK == OEK_Deleted && (*I)->isDeleted()))
+      S.Diag((*I)->getLocation(), diag::note_overridden_virtual_function);
+  }
+}
+
 /// AddOverriddenMethods - See if a method overrides any in the base classes,
 /// and if so, check that it's a valid override and remember it.
 bool Sema::AddOverriddenMethods(CXXRecordDecl *DC, CXXMethodDecl *MD) {
@@ -4718,6 +4823,8 @@ bool Sema::AddOverriddenMethods(CXXRecordDecl *DC, CXXMethodDecl *MD) {
   FindOverriddenMethodData Data;
   Data.Method = MD;
   Data.S = this;
+  bool hasDeletedOverridenMethods = false;
+  bool hasNonDeletedOverridenMethods = false;
   bool AddedAny = false;
   if (DC->lookupInBases(&FindOverriddenMethod, &Data, Paths)) {
     for (CXXBasePaths::decl_iterator I = Paths.found_decls_begin(),
@@ -4727,12 +4834,21 @@ bool Sema::AddOverriddenMethods(CXXRecordDecl *DC, CXXMethodDecl *MD) {
         if (!CheckOverridingFunctionReturnType(MD, OldMD) &&
             !CheckOverridingFunctionExceptionSpec(MD, OldMD) &&
             !CheckIfOverriddenFunctionIsMarkedFinal(MD, OldMD)) {
+          hasDeletedOverridenMethods |= OldMD->isDeleted();
+          hasNonDeletedOverridenMethods |= !OldMD->isDeleted();
           AddedAny = true;
         }
       }
     }
   }
-  
+
+  if (hasDeletedOverridenMethods && !MD->isDeleted()) {
+    ReportOverrides(*this, diag::err_non_deleted_override, MD, OEK_Deleted);
+  }
+  if (hasNonDeletedOverridenMethods && MD->isDeleted()) {
+    ReportOverrides(*this, diag::err_deleted_override, MD, OEK_NonDeleted);
+  }
+
   return AddedAny;
 }
 
@@ -4892,6 +5008,10 @@ static NamedDecl* DiagnoseInvalidRedeclaration(
   }
 
   if (Correction) {
+    // FIXME: use Correction.getCorrectionRange() instead of computing the range
+    // here. This requires passing in the CXXScopeSpec to CorrectTypo which in
+    // turn causes the correction to fully qualify the name. If we fix
+    // CorrectTypo to minimally qualify then this change should be good.
     SourceRange FixItLoc(NewFD->getLocation());
     CXXScopeSpec &SS = ExtraArgs.D.getCXXScopeSpec();
     if (Correction.getCorrectionSpecifier() && SS.isValid())
@@ -5127,6 +5247,22 @@ static FunctionDecl* CreateNewFunctionDecl(Sema &SemaRef, Declarator &D,
   }
 }
 
+void Sema::checkVoidParamDecl(ParmVarDecl *Param) {
+  // In C++, the empty parameter-type-list must be spelled "void"; a
+  // typedef of void is not permitted.
+  if (getLangOpts().CPlusPlus &&
+      Param->getType().getUnqualifiedType() != Context.VoidTy) {
+    bool IsTypeAlias = false;
+    if (const TypedefType *TT = Param->getType()->getAs<TypedefType>())
+      IsTypeAlias = isa<TypeAliasDecl>(TT->getDecl());
+    else if (const TemplateSpecializationType *TST =
+               Param->getType()->getAs<TemplateSpecializationType>())
+      IsTypeAlias = TST->isTypeAlias();
+    Diag(Param->getLocation(), diag::err_param_typedef_of_void)
+      << IsTypeAlias;
+  }
+}
+
 NamedDecl*
 Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
                               TypeSourceInfo *TInfo, LookupResult &Previous,
@@ -5193,11 +5329,12 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
       NewFD->setImplicitlyInline();
     }
 
-    // if this is a method defined in an __interface, set pure
-    // (isVirtual will already return true)
-    if (CXXRecordDecl *Parent = dyn_cast<CXXRecordDecl>(
-        NewFD->getDeclContext())) {
-      if (Parent->getTagKind() == TTK_Interface)
+    // If this is a method defined in an __interface, and is not a constructor
+    // or an overloaded operator, then set the pure flag (isVirtual will already
+    // return true).
+    if (const CXXRecordDecl *Parent =
+          dyn_cast<CXXRecordDecl>(NewFD->getDeclContext())) {
+      if (Parent->isInterface() && cast<CXXMethodDecl>(NewFD)->isUserProvided())
         NewFD->setPure(true);
     }
 
@@ -5439,6 +5576,20 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
            diag::err_static_out_of_line)
         << FixItHint::CreateRemoval(D.getDeclSpec().getStorageClassSpecLoc());
     }
+
+    // C++11 [except.spec]p15:
+    //   A deallocation function with no exception-specification is treated
+    //   as if it were specified with noexcept(true).
+    const FunctionProtoType *FPT = R->getAs<FunctionProtoType>();
+    if ((Name.getCXXOverloadedOperator() == OO_Delete ||
+         Name.getCXXOverloadedOperator() == OO_Array_Delete) &&
+        getLangOpts().CPlusPlus0x && FPT && !FPT->hasExceptionSpec()) {
+      FunctionProtoType::ExtProtoInfo EPI = FPT->getExtProtoInfo();
+      EPI.ExceptionSpecType = EST_BasicNoexcept;
+      NewFD->setType(Context.getFunctionType(FPT->getResultType(),
+                                             FPT->arg_type_begin(),
+                                             FPT->getNumArgs(), EPI));
+    }
   }
 
   // Filter out previous declarations that don't match the scope.
@@ -5476,21 +5627,7 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
         FTI.ArgInfo[0].Param &&
         cast<ParmVarDecl>(FTI.ArgInfo[0].Param)->getType()->isVoidType()) {
       // Empty arg list, don't push any params.
-      ParmVarDecl *Param = cast<ParmVarDecl>(FTI.ArgInfo[0].Param);
-
-      // In C++, the empty parameter-type-list must be spelled "void"; a
-      // typedef of void is not permitted.
-      if (getLangOpts().CPlusPlus &&
-          Param->getType().getUnqualifiedType() != Context.VoidTy) {
-        bool IsTypeAlias = false;
-        if (const TypedefType *TT = Param->getType()->getAs<TypedefType>())
-          IsTypeAlias = isa<TypeAliasDecl>(TT->getDecl());
-        else if (const TemplateSpecializationType *TST =
-                   Param->getType()->getAs<TemplateSpecializationType>())
-          IsTypeAlias = TST->isTypeAlias();
-        Diag(Param->getLocation(), diag::err_param_typedef_of_void)
-          << IsTypeAlias;
-      }
+      checkVoidParamDecl(cast<ParmVarDecl>(FTI.ArgInfo[0].Param));
     } else if (FTI.NumArgs > 0 && FTI.ArgInfo[0].Param != 0) {
       for (unsigned i = 0, e = FTI.NumArgs; i != e; ++i) {
         ParmVarDecl *Param = cast<ParmVarDecl>(FTI.ArgInfo[i].Param);
@@ -6033,20 +6170,12 @@ bool Sema::CheckFunctionDeclaration(Scope *S, FunctionDecl *NewFD,
     // Find any virtual functions that this function overrides.
     if (CXXMethodDecl *Method = dyn_cast<CXXMethodDecl>(NewFD)) {
       if (!Method->isFunctionTemplateSpecialization() && 
-          !Method->getDescribedFunctionTemplate()) {
+          !Method->getDescribedFunctionTemplate() &&
+          Method->isCanonicalDecl()) {
         if (AddOverriddenMethods(Method->getParent(), Method)) {
           // If the function was marked as "static", we have a problem.
           if (NewFD->getStorageClass() == SC_Static) {
-            Diag(NewFD->getLocation(), diag::err_static_overrides_virtual)
-              << NewFD->getDeclName();
-            for (CXXMethodDecl::method_iterator 
-                      Overridden = Method->begin_overridden_methods(),
-                   OverriddenEnd = Method->end_overridden_methods();
-                 Overridden != OverriddenEnd;
-                 ++Overridden) {
-              Diag((*Overridden)->getLocation(), 
-                   diag::note_overridden_virtual_function);
-            }
+            ReportOverrides(*this, diag::err_static_overrides_virtual, Method);
           }
         }
       }
@@ -6255,28 +6384,12 @@ namespace {
       }
     }
 
-    // Sometimes, the expression passed in lacks the casts that are used
-    // to determine which DeclRefExpr's to check.  Assume that the casts
-    // are present and continue visiting the expression.
-    void HandleExpr(Expr *E) {
-      // Skip checking T a = a where T is not a record or reference type.
-      // Doing so is a way to silence uninitialized warnings.
-      if (isRecordType || isReferenceType)
-        if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E))
-          HandleDeclRefExpr(DRE);
-
-      if (ConditionalOperator *CO = dyn_cast<ConditionalOperator>(E)) {
-        HandleValue(CO->getTrueExpr());
-        HandleValue(CO->getFalseExpr());
-      }
-
-      Visit(E);
-    }
-
     // For most expressions, the cast is directly above the DeclRefExpr.
     // For conditional operators, the cast can be outside the conditional
     // operator if both expressions are DeclRefExpr's.
     void HandleValue(Expr *E) {
+      if (isReferenceType)
+        return;
       E = E->IgnoreParenImpCasts();
       if (DeclRefExpr* DRE = dyn_cast<DeclRefExpr>(E)) {
         HandleDeclRefExpr(DRE);
@@ -6286,11 +6399,32 @@ namespace {
       if (ConditionalOperator *CO = dyn_cast<ConditionalOperator>(E)) {
         HandleValue(CO->getTrueExpr());
         HandleValue(CO->getFalseExpr());
+        return;
+      }
+
+      if (isa<MemberExpr>(E)) {
+        Expr *Base = E->IgnoreParenImpCasts();
+        while (MemberExpr *ME = dyn_cast<MemberExpr>(Base)) {
+          // Check for static member variables and don't warn on them.
+          if (!isa<FieldDecl>(ME->getMemberDecl()))
+            return;
+          Base = ME->getBase()->IgnoreParenImpCasts();
+        }
+        if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(Base))
+          HandleDeclRefExpr(DRE);
+        return;
       }
     }
 
+    // Reference types are handled here since all uses of references are
+    // bad, not just r-value uses.
+    void VisitDeclRefExpr(DeclRefExpr *E) {
+      if (isReferenceType)
+        HandleDeclRefExpr(E);
+    }
+
     void VisitImplicitCastExpr(ImplicitCastExpr *E) {
-      if ((!isRecordType && E->getCastKind() == CK_LValueToRValue) ||
+      if (E->getCastKind() == CK_LValueToRValue ||
           (isRecordType && E->getCastKind() == CK_NoOp))
         HandleValue(E->getSubExpr());
 
@@ -6301,22 +6435,36 @@ namespace {
       // Don't warn on arrays since they can be treated as pointers.
       if (E->getType()->canDecayToPointerType()) return;
 
-      ValueDecl *VD = E->getMemberDecl();
-      CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(VD);
-      if (isa<FieldDecl>(VD) || (MD && !MD->isStatic()))
-        if (DeclRefExpr *DRE
-              = dyn_cast<DeclRefExpr>(E->getBase()->IgnoreParenImpCasts())) {
-          HandleDeclRefExpr(DRE);
-          return;
-        }
+      // Warn when a non-static method call is followed by non-static member
+      // field accesses, which is followed by a DeclRefExpr.
+      CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(E->getMemberDecl());
+      bool Warn = (MD && !MD->isStatic());
+      Expr *Base = E->getBase()->IgnoreParenImpCasts();
+      while (MemberExpr *ME = dyn_cast<MemberExpr>(Base)) {
+        if (!isa<FieldDecl>(ME->getMemberDecl()))
+          Warn = false;
+        Base = ME->getBase()->IgnoreParenImpCasts();
+      }
 
-      Inherited::VisitMemberExpr(E);
+      if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(Base)) {
+        if (Warn)
+          HandleDeclRefExpr(DRE);
+        return;
+      }
+
+      // The base of a MemberExpr is not a MemberExpr or a DeclRefExpr.
+      // Visit that expression.
+      Visit(Base);
     }
 
     void VisitUnaryOperator(UnaryOperator *E) {
       // For POD record types, addresses of its own members are well-defined.
-      if (E->getOpcode() == UO_AddrOf && isRecordType && isPODType &&
-          isa<MemberExpr>(E->getSubExpr()->IgnoreParens())) return;
+      if (E->getOpcode() == UO_AddrOf && isRecordType &&
+          isa<MemberExpr>(E->getSubExpr()->IgnoreParens())) {
+        if (!isPODType)
+          HandleValue(E->getSubExpr());
+        return;
+      }
       Inherited::VisitUnaryOperator(E);
     } 
 
@@ -6325,23 +6473,38 @@ namespace {
     void HandleDeclRefExpr(DeclRefExpr *DRE) {
       Decl* ReferenceDecl = DRE->getDecl(); 
       if (OrigDecl != ReferenceDecl) return;
-      LookupResult Result(S, DRE->getNameInfo(), Sema::LookupOrdinaryName,
-                          Sema::NotForRedeclaration);
       unsigned diag = isReferenceType
           ? diag::warn_uninit_self_reference_in_reference_init
           : diag::warn_uninit_self_reference_in_init;
       S.DiagRuntimeBehavior(DRE->getLocStart(), DRE,
                             S.PDiag(diag)
-                              << Result.getLookupName()
+                              << DRE->getNameInfo().getName()
                               << OrigDecl->getLocation()
                               << DRE->getSourceRange());
     }
   };
-}
 
-/// CheckSelfReference - Warns if OrigDecl is used in expression E.
-void Sema::CheckSelfReference(Decl* OrigDecl, Expr *E) {
-  SelfReferenceChecker(*this, OrigDecl).HandleExpr(E);
+  /// CheckSelfReference - Warns if OrigDecl is used in expression E.
+  static void CheckSelfReference(Sema &S, Decl* OrigDecl, Expr *E,
+                                 bool DirectInit) {
+    // Parameters arguments are occassionially constructed with itself,
+    // for instance, in recursive functions.  Skip them.
+    if (isa<ParmVarDecl>(OrigDecl))
+      return;
+
+    E = E->IgnoreParens();
+
+    // Skip checking T a = a where T is not a record or reference type.
+    // Doing so is a way to silence uninitialized warnings.
+    if (!DirectInit && !cast<VarDecl>(OrigDecl)->getType()->isRecordType())
+      if (ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(E))
+        if (ICE->getCastKind() == CK_LValueToRValue)
+          if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(ICE->getSubExpr()))
+            if (DRE->getDecl() == OrigDecl)
+              return;
+
+    SelfReferenceChecker(S, OrigDecl).Visit(E);
+  }
 }
 
 /// AddInitializerToDecl - Adds the initializer Init to the
@@ -6377,15 +6540,6 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init,
     RealDecl->setInvalidDecl();
     return;
   }
-
-  // Check for self-references within variable initializers.
-  // Variables declared within a function/method body (except for references)
-  // are handled by a dataflow analysis.
-  // Record types initialized by initializer list are handled here.
-  // Initialization by constructors are handled in TryConstructorInitialization.
-  if ((!VDecl->hasLocalStorage() || VDecl->getType()->isReferenceType()) &&
-      (isa<InitListExpr>(Init) || !VDecl->getType()->isRecordType()))
-    CheckSelfReference(RealDecl, Init);
 
   ParenListExpr *CXXDirectInit = dyn_cast<ParenListExpr>(Init);
 
@@ -6571,6 +6725,14 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init,
     Init = Result.takeAs<Expr>();
   }
 
+  // Check for self-references within variable initializers.
+  // Variables declared within a function/method body (except for references)
+  // are handled by a dataflow analysis.
+  if (!VDecl->hasLocalStorage() || VDecl->getType()->isRecordType() ||
+      VDecl->getType()->isReferenceType()) {
+    CheckSelfReference(*this, RealDecl, Init, DirectInit);
+  }
+
   // If the type changed, it means we had an incomplete type that was
   // completed by the initializer. For example:
   //   int ary[] = { 1, 3, 5 };
@@ -6581,8 +6743,27 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init,
   // Check any implicit conversions within the expression.
   CheckImplicitConversions(Init, VDecl->getLocation());
 
-  if (!VDecl->isInvalidDecl())
+  if (!VDecl->isInvalidDecl()) {
     checkUnsafeAssigns(VDecl->getLocation(), VDecl->getType(), Init);
+
+    if (VDecl->hasAttr<BlocksAttr>())
+      checkRetainCycles(VDecl, Init);
+
+    // It is safe to assign a weak reference into a strong variable.
+    // Although this code can still have problems:
+    //   id x = self.weakProp;
+    //   id y = self.weakProp;
+    // we do not warn to warn spuriously when 'x' and 'y' are on separate
+    // paths through the function. This should be revisited if
+    // -Wrepeated-use-of-weak is made flow-sensitive.
+    if (VDecl->getType().getObjCLifetime() == Qualifiers::OCL_Strong) {
+      DiagnosticsEngine::Level Level =
+        Diags.getDiagnosticLevel(diag::warn_arc_repeated_use_of_weak,
+                                 Init->getLocStart());
+      if (Level != DiagnosticsEngine::Ignored)
+        getCurFunction()->markSafeWeakUse(Init);
+    }
+  }
 
   Init = MaybeCreateExprWithCleanups(Init);
   // Attach the initializer to the decl.
@@ -7024,11 +7205,22 @@ void Sema::CheckCompleteVariableDeclaration(VarDecl *var) {
     }
   }
 
+  if (var->isThisDeclarationADefinition() &&
+      var->getLinkage() == ExternalLinkage) {
+    // Find a previous declaration that's not a definition.
+    VarDecl *prev = var->getPreviousDecl();
+    while (prev && prev->isThisDeclarationADefinition())
+      prev = prev->getPreviousDecl();
+
+    if (!prev)
+      Diag(var->getLocation(), diag::warn_missing_variable_declarations) << var;
+  }
+
   // All the following checks are C++ only.
   if (!getLangOpts().CPlusPlus) return;
 
-  QualType baseType = Context.getBaseElementType(var->getType());
-  if (baseType->isDependentType()) return;
+  QualType type = var->getType();
+  if (type->isDependentType()) return;
 
   // __block variables might require us to capture a copy-initializer.
   if (var->hasAttr<BlocksAttr>()) {
@@ -7037,8 +7229,6 @@ void Sema::CheckCompleteVariableDeclaration(VarDecl *var) {
 
     // Regardless, we don't want to ignore array nesting when
     // constructing this copy.
-    QualType type = var->getType();
-
     if (type->isStructureOrClassType()) {
       SourceLocation poi = var->getLocation();
       Expr *varRef =new (Context) DeclRefExpr(var, false, type, VK_LValue, poi);
@@ -7056,8 +7246,10 @@ void Sema::CheckCompleteVariableDeclaration(VarDecl *var) {
 
   Expr *Init = var->getInit();
   bool IsGlobal = var->hasGlobalStorage() && !var->isStaticLocal();
+  QualType baseType = Context.getBaseElementType(type);
 
-  if (!var->getDeclContext()->isDependentContext() && Init) {
+  if (!var->getDeclContext()->isDependentContext() &&
+      Init && !Init->isValueDependent()) {
     if (IsGlobal && !var->isConstexpr() &&
         getDiagnostics().getDiagnosticLevel(diag::warn_global_constructor,
                                             var->getLocation())
@@ -7245,7 +7437,7 @@ void Sema::ActOnDocumentableDecls(Decl **Group, unsigned NumDecls) {
     // the lookahead in the lexer: we've consumed the semicolon and looked
     // ahead through comments.
     for (unsigned i = 0; i != NumDecls; ++i)
-      Context.getCommentForDecl(Group[i]);
+      Context.getCommentForDecl(Group[i], &PP);
   }
 }
 
@@ -7517,6 +7709,9 @@ void Sema::ActOnFinishKNRParamDeclarations(Scope *S, Declarator &D,
         unsigned DiagID; // unused
         DS.SetTypeSpecType(DeclSpec::TST_int, FTI.ArgInfo[i].IdentLoc,
                            PrevSpec, DiagID);
+        // Use the identifier location for the type source range.
+        DS.SetRangeStart(FTI.ArgInfo[i].IdentLoc);
+        DS.SetRangeEnd(FTI.ArgInfo[i].IdentLoc);
         Declarator ParamD(DS, Declarator::KNRTypeListContext);
         ParamD.SetIdentifier(FTI.ArgInfo[i].Ident, FTI.ArgInfo[i].IdentLoc);
         FTI.ArgInfo[i].Param = ActOnParamDeclarator(S, ParamD);
@@ -7831,22 +8026,16 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body,
       if (Body)
         computeNRVO(Body, getCurFunction());
     }
-    if (getCurFunction()->ObjCShouldCallSuperDealloc) {
-      Diag(MD->getLocEnd(), diag::warn_objc_missing_super_dealloc);
-      getCurFunction()->ObjCShouldCallSuperDealloc = false;
-    }
-    if (getCurFunction()->ObjCShouldCallSuperFinalize) {
-      Diag(MD->getLocEnd(), diag::warn_objc_missing_super_finalize);
-      getCurFunction()->ObjCShouldCallSuperFinalize = false;
+    if (getCurFunction()->ObjCShouldCallSuper) {
+      Diag(MD->getLocEnd(), diag::warn_objc_missing_super_call)
+        << MD->getSelector().getAsString();
+      getCurFunction()->ObjCShouldCallSuper = false;
     }
   } else {
     return 0;
   }
 
-  assert(!getCurFunction()->ObjCShouldCallSuperDealloc &&
-         "This should only be set for ObjC methods, which should have been "
-         "handled in the block above.");
-  assert(!getCurFunction()->ObjCShouldCallSuperFinalize &&
+  assert(!getCurFunction()->ObjCShouldCallSuper &&
          "This should only be set for ObjC methods, which should have been "
          "handled in the block above.");
 
@@ -7982,13 +8171,28 @@ NamedDecl *Sema::ImplicitlyDefineFunction(SourceLocation Loc,
   bool Error = DS.SetTypeSpecType(DeclSpec::TST_int, Loc, Dummy, DiagID);
   (void)Error; // Silence warning.
   assert(!Error && "Error setting up implicit decl!");
+  SourceLocation NoLoc;
   Declarator D(DS, Declarator::BlockContext);
-  D.AddTypeInfo(DeclaratorChunk::getFunction(false, false, false,
-                                             SourceLocation(), 0, 0, 0, true, 
-                                             SourceLocation(), SourceLocation(),
-                                             SourceLocation(), SourceLocation(),
-                                             EST_None, SourceLocation(),
-                                             0, 0, 0, 0, Loc, Loc, D),
+  D.AddTypeInfo(DeclaratorChunk::getFunction(/*HasProto=*/false,
+                                             /*IsAmbiguous=*/false,
+                                             /*RParenLoc=*/NoLoc,
+                                             /*ArgInfo=*/0,
+                                             /*NumArgs=*/0,
+                                             /*EllipsisLoc=*/NoLoc,
+                                             /*RParenLoc=*/NoLoc,
+                                             /*TypeQuals=*/0,
+                                             /*RefQualifierIsLvalueRef=*/true,
+                                             /*RefQualifierLoc=*/NoLoc,
+                                             /*ConstQualifierLoc=*/NoLoc,
+                                             /*VolatileQualifierLoc=*/NoLoc,
+                                             /*MutableLoc=*/NoLoc,
+                                             EST_None,
+                                             /*ESpecLoc=*/NoLoc,
+                                             /*Exceptions=*/0,
+                                             /*ExceptionRanges=*/0,
+                                             /*NumExceptions=*/0,
+                                             /*NoexceptExpr=*/0,
+                                             Loc, Loc, D),
                 DS.getAttributes(),
                 SourceLocation());
   D.SetIdentifier(&II, Loc);
@@ -9388,12 +9592,15 @@ FieldDecl *Sema::CheckFieldDecl(DeclarationName Name, QualType T,
   if (!InvalidDecl && T->isVariablyModifiedType()) {
     bool SizeIsNegative;
     llvm::APSInt Oversized;
-    QualType FixedTy = TryToFixInvalidVariablyModifiedType(T, Context,
-                                                           SizeIsNegative,
-                                                           Oversized);
-    if (!FixedTy.isNull()) {
+
+    TypeSourceInfo *FixedTInfo =
+      TryToFixInvalidVariablyModifiedTypeSourceInfo(TInfo, Context,
+                                                    SizeIsNegative,
+                                                    Oversized);
+    if (FixedTInfo) {
       Diag(Loc, diag::warn_illegal_constant_array_size);
-      T = FixedTy;
+      TInfo = FixedTInfo;
+      T = FixedTInfo->getType();
     } else {
       if (SizeIsNegative)
         Diag(Loc, diag::err_typecheck_negative_array_size);
@@ -10115,42 +10322,6 @@ void Sema::ActOnFields(Scope* S,
           Convs->setAccess(I, (*I)->getAccess());
         
         if (!CXXRecord->isDependentType()) {
-          // Objective-C Automatic Reference Counting:
-          //   If a class has a non-static data member of Objective-C pointer
-          //   type (or array thereof), it is a non-POD type and its
-          //   default constructor (if any), copy constructor, copy assignment
-          //   operator, and destructor are non-trivial.
-          //
-          // This rule is also handled by CXXRecordDecl::completeDefinition(). 
-          // However, here we check whether this particular class is only 
-          // non-POD because of the presence of an Objective-C pointer member. 
-          // If so, objects of this type cannot be shared between code compiled 
-          // with ARC and code compiled with manual retain/release.
-          if (getLangOpts().ObjCAutoRefCount &&
-              CXXRecord->hasObjectMember() && 
-              CXXRecord->getLinkage() == ExternalLinkage) {
-            if (CXXRecord->isPOD()) {
-              Diag(CXXRecord->getLocation(), 
-                   diag::warn_arc_non_pod_class_with_object_member)
-               << CXXRecord;
-            } else {
-              // FIXME: Fix-Its would be nice here, but finding a good location
-              // for them is going to be tricky.
-              if (CXXRecord->hasTrivialCopyConstructor())
-                Diag(CXXRecord->getLocation(), 
-                     diag::warn_arc_trivial_member_function_with_object_member)
-                  << CXXRecord << 0;
-              if (CXXRecord->hasTrivialCopyAssignment())
-                Diag(CXXRecord->getLocation(), 
-                     diag::warn_arc_trivial_member_function_with_object_member)
-                << CXXRecord << 1;
-              if (CXXRecord->hasTrivialDestructor())
-                Diag(CXXRecord->getLocation(), 
-                     diag::warn_arc_trivial_member_function_with_object_member)
-                << CXXRecord << 2;
-            }
-          }
-          
           // Adjust user-defined destructor exception spec.
           if (getLangOpts().CPlusPlus0x &&
               CXXRecord->hasUserDeclaredDestructor())
@@ -10551,233 +10722,6 @@ Decl *Sema::ActOnEnumConstant(Scope *S, Decl *theEnumDecl, Decl *lastEnumConst,
   return New;
 }
 
-// Emits a warning if every element in the enum is the same value and if
-// every element is initialized with a integer or boolean literal.
-static void CheckForUniqueEnumValues(Sema &S, Decl **Elements,
-                                     unsigned NumElements, EnumDecl *Enum,
-                                     QualType EnumType) {
-  if (S.Diags.getDiagnosticLevel(diag::warn_identical_enum_values,
-                                 Enum->getLocation()) ==
-      DiagnosticsEngine::Ignored)
-    return;
-
-  if (NumElements < 2)
-    return;
-
-  if (!Enum->getIdentifier())
-    return;
-
-  llvm::APSInt FirstVal;
-
-  for (unsigned i = 0; i != NumElements; ++i) {
-    EnumConstantDecl *ECD = cast_or_null<EnumConstantDecl>(Elements[i]);
-    if (!ECD)
-      return;
-
-    Expr *InitExpr = ECD->getInitExpr();
-    if (!InitExpr)
-      return;
-    InitExpr = InitExpr->IgnoreImpCasts();
-    if (!isa<IntegerLiteral>(InitExpr) && !isa<CXXBoolLiteralExpr>(InitExpr))
-      return;
-
-    if (i == 0) {
-      FirstVal = ECD->getInitVal();
-      continue;
-    }
-
-    if (!llvm::APSInt::isSameValue(FirstVal, ECD->getInitVal()))
-      return;
-  }
-
-  S.Diag(Enum->getLocation(), diag::warn_identical_enum_values)
-      << EnumType << FirstVal.toString(10)
-      << Enum->getSourceRange();
-
-  EnumConstantDecl *Last = cast<EnumConstantDecl>(Elements[NumElements - 1]),
-                   *Next = cast<EnumConstantDecl>(Elements[NumElements - 2]);
-
-  S.Diag(Last->getLocation(), diag::note_identical_enum_values)
-    << FixItHint::CreateReplacement(Last->getInitExpr()->getSourceRange(),
-                                    Next->getName());
-}
-
-// Returns true when the enum initial expression does not trigger the
-// duplicate enum warning.  A few common cases are exempted as follows:
-// Element2 = Element1
-// Element2 = Element1 + 1
-// Element2 = Element1 - 1
-// Where Element2 and Element1 are from the same enum.
-static bool ValidDuplicateEnum(EnumConstantDecl *ECD, EnumDecl *Enum) {
-  Expr *InitExpr = ECD->getInitExpr();
-  if (!InitExpr)
-    return true;
-  InitExpr = InitExpr->IgnoreImpCasts();
-
-  if (BinaryOperator *BO = dyn_cast<BinaryOperator>(InitExpr)) {
-    if (!BO->isAdditiveOp())
-      return true;
-    IntegerLiteral *IL = dyn_cast<IntegerLiteral>(BO->getRHS());
-    if (!IL)
-      return true;
-    if (IL->getValue() != 1)
-      return true;
-
-    InitExpr = BO->getLHS();
-  }
-
-  // This checks if the elements are from the same enum.
-  DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(InitExpr);
-  if (!DRE)
-    return true;
-
-  EnumConstantDecl *EnumConstant = dyn_cast<EnumConstantDecl>(DRE->getDecl());
-  if (!EnumConstant)
-    return true;
-
-  if (cast<EnumDecl>(TagDecl::castFromDeclContext(ECD->getDeclContext())) !=
-      Enum)
-    return true;
-
-  return false;
-}
-
-struct DupKey {
-  int64_t val;
-  bool isTombstoneOrEmptyKey;
-  DupKey(int64_t val, bool isTombstoneOrEmptyKey)
-    : val(val), isTombstoneOrEmptyKey(isTombstoneOrEmptyKey) {}
-};
-
-static DupKey GetDupKey(const llvm::APSInt& Val) {
-  return DupKey(Val.isSigned() ? Val.getSExtValue() : Val.getZExtValue(),
-                false);
-}
-
-struct DenseMapInfoDupKey {
-  static DupKey getEmptyKey() { return DupKey(0, true); }
-  static DupKey getTombstoneKey() { return DupKey(1, true); }
-  static unsigned getHashValue(const DupKey Key) {
-    return (unsigned)(Key.val * 37);
-  }
-  static bool isEqual(const DupKey& LHS, const DupKey& RHS) {
-    return LHS.isTombstoneOrEmptyKey == RHS.isTombstoneOrEmptyKey &&
-           LHS.val == RHS.val;
-  }
-};
-
-// Emits a warning when an element is implicitly set a value that
-// a previous element has already been set to.
-static void CheckForDuplicateEnumValues(Sema &S, Decl **Elements,
-                                        unsigned NumElements, EnumDecl *Enum,
-                                        QualType EnumType) {
-  if (S.Diags.getDiagnosticLevel(diag::warn_duplicate_enum_values,
-                                 Enum->getLocation()) ==
-      DiagnosticsEngine::Ignored)
-    return;
-  // Avoid anonymous enums
-  if (!Enum->getIdentifier())
-    return;
-
-  // Only check for small enums.
-  if (Enum->getNumPositiveBits() > 63 || Enum->getNumNegativeBits() > 64)
-    return;
-
-  typedef llvm::SmallVector<EnumConstantDecl*, 3> ECDVector;
-  typedef llvm::SmallVector<ECDVector*, 3> DuplicatesVector;
-
-  typedef llvm::PointerUnion<EnumConstantDecl*, ECDVector*> DeclOrVector;
-  typedef llvm::DenseMap<DupKey, DeclOrVector, DenseMapInfoDupKey>
-          ValueToVectorMap;
-
-  DuplicatesVector DupVector;
-  ValueToVectorMap EnumMap;
-
-  // Populate the EnumMap with all values represented by enum constants without
-  // an initialier.
-  for (unsigned i = 0; i < NumElements; ++i) {
-    EnumConstantDecl *ECD = cast<EnumConstantDecl>(Elements[i]);
-
-    // Null EnumConstantDecl means a previous diagnostic has been emitted for
-    // this constant.  Skip this enum since it may be ill-formed.
-    if (!ECD) {
-      return;
-    }
-
-    if (ECD->getInitExpr())
-      continue;
-
-    DupKey Key = GetDupKey(ECD->getInitVal());
-    DeclOrVector &Entry = EnumMap[Key];
-
-    // First time encountering this value.
-    if (Entry.isNull())
-      Entry = ECD;
-  }
-
-  // Create vectors for any values that has duplicates.
-  for (unsigned i = 0; i < NumElements; ++i) {
-    EnumConstantDecl *ECD = cast<EnumConstantDecl>(Elements[i]);
-    if (!ValidDuplicateEnum(ECD, Enum))
-      continue;
-
-    DupKey Key = GetDupKey(ECD->getInitVal());
-
-    DeclOrVector& Entry = EnumMap[Key];
-    if (Entry.isNull())
-      continue;
-
-    if (EnumConstantDecl *D = Entry.dyn_cast<EnumConstantDecl*>()) {
-      // Ensure constants are different.
-      if (D == ECD)
-        continue;
-
-      // Create new vector and push values onto it.
-      ECDVector *Vec = new ECDVector();
-      Vec->push_back(D);
-      Vec->push_back(ECD);
-
-      // Update entry to point to the duplicates vector.
-      Entry = Vec;
-
-      // Store the vector somewhere we can consult later for quick emission of
-      // diagnostics.
-      DupVector.push_back(Vec);
-      continue;
-    }
-
-    ECDVector *Vec = Entry.get<ECDVector*>();
-    // Make sure constants are not added more than once.
-    if (*Vec->begin() == ECD)
-      continue;
-
-    Vec->push_back(ECD);
-  }
-
-  // Emit diagnostics.
-  for (DuplicatesVector::iterator DupVectorIter = DupVector.begin(),
-                                  DupVectorEnd = DupVector.end();
-       DupVectorIter != DupVectorEnd; ++DupVectorIter) {
-    ECDVector *Vec = *DupVectorIter;
-    assert(Vec->size() > 1 && "ECDVector should have at least 2 elements.");
-
-    // Emit warning for one enum constant.
-    ECDVector::iterator I = Vec->begin();
-    S.Diag((*I)->getLocation(), diag::warn_duplicate_enum_values)
-      << (*I)->getName() << (*I)->getInitVal().toString(10)
-      << (*I)->getSourceRange();
-    ++I;
-
-    // Emit one note for each of the remaining enum constants with
-    // the same value.
-    for (ECDVector::iterator E = Vec->end(); I != E; ++I)
-      S.Diag((*I)->getLocation(), diag::note_duplicate_element)
-        << (*I)->getName() << (*I)->getInitVal().toString(10)
-        << (*I)->getSourceRange();
-    delete Vec;
-  }
-}
-
 void Sema::ActOnEnumBody(SourceLocation EnumLoc, SourceLocation LBraceLoc,
                          SourceLocation RBraceLoc, Decl *EnumDeclX,
                          Decl **Elements, unsigned NumElements,
@@ -11000,9 +10944,6 @@ void Sema::ActOnEnumBody(SourceLocation EnumLoc, SourceLocation LBraceLoc,
   // it needs to go into the function scope.
   if (InFunctionDeclarator)
     DeclsInPrototypeScope.push_back(Enum);
-
-  CheckForUniqueEnumValues(*this, Elements, NumElements, Enum, EnumType);
-  CheckForDuplicateEnumValues(*this, Elements, NumElements, Enum, EnumType);
 }
 
 Decl *Sema::ActOnFileScopeAsmDecl(Expr *expr,

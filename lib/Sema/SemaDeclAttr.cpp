@@ -864,16 +864,12 @@ static void handleLockReturnedAttr(Sema &S, Decl *D,
 
   if (!checkAttributeNumArgs(S, Attr, 1))
     return;
-  Expr *Arg = Attr.getArg(0);
 
   if (!isa<FunctionDecl>(D) && !isa<FunctionTemplateDecl>(D)) {
     S.Diag(Attr.getLoc(), diag::warn_thread_attribute_wrong_decl_type)
       << Attr.getName() << ThreadExpectedFunctionOrMethod;
     return;
   }
-
-  if (Arg->isTypeDependent())
-    return;
 
   // check that the argument is lockable object
   SmallVector<Expr*, 1> Args;
@@ -967,7 +963,8 @@ static void handlePackedAttr(Sema &S, Decl *D, const AttributeList &Attr) {
   else if (FieldDecl *FD = dyn_cast<FieldDecl>(D)) {
     // If the alignment is less than or equal to 8 bits, the packed attribute
     // has no effect.
-    if (!FD->getType()->isIncompleteType() &&
+    if (!FD->getType()->isDependentType() &&
+        !FD->getType()->isIncompleteType() &&
         S.Context.getTypeAlign(FD->getType()) <= 8)
       S.Diag(Attr.getLoc(), diag::warn_attribute_ignored_for_field_of_type)
         << Attr.getName() << FD->getType();
@@ -978,8 +975,8 @@ static void handlePackedAttr(Sema &S, Decl *D, const AttributeList &Attr) {
 }
 
 static void handleMsStructAttr(Sema &S, Decl *D, const AttributeList &Attr) {
-  if (TagDecl *TD = dyn_cast<TagDecl>(D))
-    TD->addAttr(::new (S.Context) MsStructAttr(Attr.getRange(), S.Context));
+  if (RecordDecl *RD = dyn_cast<RecordDecl>(D))
+    RD->addAttr(::new (S.Context) MsStructAttr(Attr.getRange(), S.Context));
   else
     S.Diag(Attr.getLoc(), diag::warn_attribute_ignored) << Attr.getName();
 }
@@ -1525,6 +1522,20 @@ static void handleAliasAttr(Sema &S, Decl *D, const AttributeList &Attr) {
 
   D->addAttr(::new (S.Context) AliasAttr(Attr.getRange(), S.Context,
                                          Str->getString()));
+}
+
+static void handleMinSizeAttr(Sema &S, Decl *D, const AttributeList &Attr) {
+  // Check the attribute arguments.
+  if (!checkAttributeNumArgs(S, Attr, 0))
+    return;
+
+  if (!isa<FunctionDecl>(D) && !isa<ObjCMethodDecl>(D)) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_wrong_decl_type)
+      << Attr.getName() << ExpectedFunctionOrMethod;
+    return;
+  }
+
+  D->addAttr(::new (S.Context) MinSizeAttr(Attr.getRange(), S.Context));
 }
 
 static void handleColdAttr(Sema &S, Decl *D, const AttributeList &Attr) {
@@ -3586,7 +3597,12 @@ static void handleCallConvAttr(Sema &S, Decl *D, const AttributeList &Attr) {
     }
 
     D->addAttr(::new (S.Context) PcsAttr(Attr.getRange(), S.Context, PCS));
+    return;
   }
+  case AttributeList::AT_PnaclCall:
+    D->addAttr(::new (S.Context) PnaclCallAttr(Attr.getRange(), S.Context));
+    return;
+
   default:
     llvm_unreachable("unexpected attribute kind");
   }
@@ -3639,7 +3655,15 @@ bool Sema::CheckCallingConvAttr(const AttributeList &attr, CallingConv &CC) {
     Diag(attr.getLoc(), diag::err_invalid_pcs);
     return true;
   }
+  case AttributeList::AT_PnaclCall: CC = CC_PnaclCall; break;
   default: llvm_unreachable("unexpected attribute kind");
+  }
+
+  const TargetInfo &TI = Context.getTargetInfo();
+  TargetInfo::CallingConvCheckResult A = TI.checkCallingConvention(CC);
+  if (A == TargetInfo::CCCR_Warning) {
+    Diag(attr.getLoc(), diag::warn_cconv_ignored) << attr.getName();
+    CC = TI.getDefaultCallingConv();
   }
 
   return false;
@@ -3974,6 +3998,33 @@ static void handleObjCReturnsInnerPointerAttr(Sema &S, Decl *D,
     ::new (S.Context) ObjCReturnsInnerPointerAttr(attr.getRange(), S.Context));
 }
 
+static void handleObjCRequiresSuperAttr(Sema &S, Decl *D,
+                                        const AttributeList &attr) {
+  SourceLocation loc = attr.getLoc();
+  ObjCMethodDecl *method = dyn_cast<ObjCMethodDecl>(D);
+  
+  if (!method) {
+   S.Diag(D->getLocStart(), diag::err_attribute_wrong_decl_type)
+   << SourceRange(loc, loc) << attr.getName() << ExpectedMethod;
+    return;
+  }
+  DeclContext *DC = method->getDeclContext();
+  if (const ObjCProtocolDecl *PDecl = dyn_cast_or_null<ObjCProtocolDecl>(DC)) {
+    S.Diag(D->getLocStart(), diag::warn_objc_requires_super_protocol)
+    << attr.getName() << 0;
+    S.Diag(PDecl->getLocation(), diag::note_protocol_decl);
+    return;
+  }
+  if (method->getMethodFamily() == OMF_dealloc) {
+    S.Diag(D->getLocStart(), diag::warn_objc_requires_super_protocol)
+    << attr.getName() << 1;
+    return;
+  }
+  
+  method->addAttr(
+    ::new (S.Context) ObjCRequiresSuperAttr(attr.getRange(), S.Context));
+}
+
 /// Handle cf_audited_transfer and cf_unknown_transfer.
 static void handleCFTransferAttr(Sema &S, Decl *D, const AttributeList &A) {
   if (!isa<FunctionDecl>(D)) {
@@ -4152,19 +4203,21 @@ static void handleUuidAttr(Sema &S, Decl *D, const AttributeList &Attr) {
 }
 
 static void handleInheritanceAttr(Sema &S, Decl *D, const AttributeList &Attr) {
-  if (S.LangOpts.MicrosoftExt) {
-    AttributeList::Kind Kind = Attr.getKind();
-    if (Kind == AttributeList::AT_SingleInheritance)
-      D->addAttr(
-          ::new (S.Context) SingleInheritanceAttr(Attr.getRange(), S.Context));
-    else if (Kind == AttributeList::AT_MultipleInheritance)
-      D->addAttr(
-          ::new (S.Context) MultipleInheritanceAttr(Attr.getRange(), S.Context));
-    else if (Kind == AttributeList::AT_VirtualInheritance)
-      D->addAttr(
-          ::new (S.Context) VirtualInheritanceAttr(Attr.getRange(), S.Context));
-  } else
+  if (!S.LangOpts.MicrosoftExt) {
     S.Diag(Attr.getLoc(), diag::warn_attribute_ignored) << Attr.getName();
+    return;
+  }
+
+  AttributeList::Kind Kind = Attr.getKind();
+  if (Kind == AttributeList::AT_SingleInheritance)
+    D->addAttr(
+        ::new (S.Context) SingleInheritanceAttr(Attr.getRange(), S.Context));
+  else if (Kind == AttributeList::AT_MultipleInheritance)
+    D->addAttr(
+        ::new (S.Context) MultipleInheritanceAttr(Attr.getRange(), S.Context));
+  else if (Kind == AttributeList::AT_VirtualInheritance)
+    D->addAttr(
+        ::new (S.Context) VirtualInheritanceAttr(Attr.getRange(), S.Context));
 }
 
 static void handlePortabilityAttr(Sema &S, Decl *D, const AttributeList &Attr) {
@@ -4296,6 +4349,9 @@ static void ProcessInheritableDeclAttr(Sema &S, Scope *scope, Decl *D,
   case AttributeList::AT_ExtVectorType:
     handleExtVectorTypeAttr(S, scope, D, Attr);
     break;
+  case AttributeList::AT_MinSize:
+    handleMinSizeAttr(S, D, Attr);
+    break;
   case AttributeList::AT_Format:      handleFormatAttr      (S, D, Attr); break;
   case AttributeList::AT_FormatArg:   handleFormatArgAttr   (S, D, Attr); break;
   case AttributeList::AT_CUDAGlobal:  handleGlobalAttr      (S, D, Attr); break;
@@ -4328,6 +4384,9 @@ static void ProcessInheritableDeclAttr(Sema &S, Scope *scope, Decl *D,
   case AttributeList::AT_ObjCReturnsInnerPointer:
     handleObjCReturnsInnerPointerAttr(S, D, Attr); break;
 
+  case AttributeList::AT_ObjCRequiresSuper:
+      handleObjCRequiresSuperAttr(S, D, Attr); break;
+      
   case AttributeList::AT_NSBridged:
     handleNSBridgedAttr(S, scope, D, Attr); break;
 
@@ -4410,6 +4469,7 @@ static void ProcessInheritableDeclAttr(Sema &S, Scope *scope, Decl *D,
   case AttributeList::AT_ThisCall:
   case AttributeList::AT_Pascal:
   case AttributeList::AT_Pcs:
+  case AttributeList::AT_PnaclCall:
     handleCallConvAttr(S, D, Attr);
     break;
   case AttributeList::AT_OpenCLKernel:
@@ -4829,18 +4889,25 @@ static bool isDeclDeprecated(Decl *D) {
 static void
 DoEmitDeprecationWarning(Sema &S, const NamedDecl *D, StringRef Message,
                          SourceLocation Loc,
-                         const ObjCInterfaceDecl *UnknownObjCClass) {
+                         const ObjCInterfaceDecl *UnknownObjCClass,
+                         const ObjCPropertyDecl *ObjCPropery) {
   DeclarationName Name = D->getDeclName();
   if (!Message.empty()) {
     S.Diag(Loc, diag::warn_deprecated_message) << Name << Message;
     S.Diag(D->getLocation(),
            isa<ObjCMethodDecl>(D) ? diag::note_method_declared_at
                                   : diag::note_previous_decl) << Name;
+    if (ObjCPropery)
+      S.Diag(ObjCPropery->getLocation(), diag::note_property_attribute)
+        << ObjCPropery->getDeclName() << 0;
   } else if (!UnknownObjCClass) {
     S.Diag(Loc, diag::warn_deprecated) << D->getDeclName();
     S.Diag(D->getLocation(),
            isa<ObjCMethodDecl>(D) ? diag::note_method_declared_at
                                   : diag::note_previous_decl) << Name;
+    if (ObjCPropery)
+      S.Diag(ObjCPropery->getLocation(), diag::note_property_attribute)
+        << ObjCPropery->getDeclName() << 0;
   } else {
     S.Diag(Loc, diag::warn_deprecated_fwdclass_message) << Name;
     S.Diag(UnknownObjCClass->getLocation(), diag::note_forward_class);
@@ -4855,16 +4922,19 @@ void Sema::HandleDelayedDeprecationCheck(DelayedDiagnostic &DD,
   DD.Triggered = true;
   DoEmitDeprecationWarning(*this, DD.getDeprecationDecl(),
                            DD.getDeprecationMessage(), DD.Loc,
-                           DD.getUnknownObjCClass());
+                           DD.getUnknownObjCClass(),
+                           DD.getObjCProperty());
 }
 
 void Sema::EmitDeprecationWarning(NamedDecl *D, StringRef Message,
                                   SourceLocation Loc,
-                                  const ObjCInterfaceDecl *UnknownObjCClass) {
+                                  const ObjCInterfaceDecl *UnknownObjCClass,
+                                  const ObjCPropertyDecl  *ObjCProperty) {
   // Delay if we're currently parsing a declaration.
   if (DelayedDiagnostics.shouldDelayDiagnostics()) {
     DelayedDiagnostics.add(DelayedDiagnostic::makeDeprecation(Loc, D, 
                                                               UnknownObjCClass,
+                                                              ObjCProperty,
                                                               Message));
     return;
   }
@@ -4872,7 +4942,7 @@ void Sema::EmitDeprecationWarning(NamedDecl *D, StringRef Message,
   // Otherwise, don't warn if our current context is deprecated.
   if (isDeclDeprecated(cast<Decl>(getCurLexicalContext())))
     return;
-  DoEmitDeprecationWarning(*this, D, Message, Loc, UnknownObjCClass);
+  DoEmitDeprecationWarning(*this, D, Message, Loc, UnknownObjCClass, ObjCProperty);
 }
 
 
