@@ -36,12 +36,13 @@ else()
   set(ENERC_STATIC_TARGET_NAME EnerCTypeChecker)
 endif()
 
-if( NOT BUILD_SHARED_LIBS AND NOT WIN32 )
-  add_clang_library(${ENERC_STATIC_TARGET_NAME} STATIC ${SOURCES})
-  target_link_libraries(${ENERC_STATIC_TARGET_NAME} ${LIBRARIES})
-
-  set_target_properties(${ENERC_STATIC_TARGET_NAME}
-    PROPERTIES
-    OUTPUT_NAME "EnerCTypeChecker")
-endif()
+# We don't need a static library.
+# if( NOT BUILD_SHARED_LIBS AND NOT WIN32 )
+#   add_clang_library(${ENERC_STATIC_TARGET_NAME} STATIC ${SOURCES})
+#   target_link_libraries(${ENERC_STATIC_TARGET_NAME} ${LIBRARIES})
+# 
+#   set_target_properties(${ENERC_STATIC_TARGET_NAME}
+#     PROPERTIES
+#     OUTPUT_NAME "EnerCTypeChecker")
+# endif()
 
