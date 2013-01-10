@@ -292,6 +292,3 @@ endif()
 
 set(BUG_REPORT_URL "http://llvm.org/bugs/" CACHE STRING
   "Default URL where bug reports are to be submitted.")
-
-add_subdirectory(enerc/EnerCTypeChecker)
-
