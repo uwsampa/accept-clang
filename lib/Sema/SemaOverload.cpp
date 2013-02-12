@@ -1354,7 +1354,7 @@ static bool tryAtomicConversion(Sema &S, Expr *From, QualType ToType,
                                 bool CStyle);
 
 
-// EnerC
+// @quals
 QualType stripCustomQuals(Sema &S, QualType typ) {
   // llvm::errs() << typ.hasLocalNonFastQualifiers() << " "
   //              << typ.getTypePtr() << "\n";
@@ -1375,11 +1375,6 @@ QualType stripCustomQuals(Sema &S, QualType typ) {
       newtyp.setLocalFastQualifiers(typ.getLocalFastQualifiers());
       return newtyp.getCanonicalType();
     }
-
-    // Then, canonicalize the type, removing the external qualifier if it is no
-    // longer necessary.
-    if (!typ.hasLocalNonFastQualifiers())
-      typ = typ.getCanonicalType();
   }
 
   // No custom qualifiers present; leave type untouched.
@@ -2835,6 +2830,10 @@ Sema::IsQualificationConversion(QualType FromType, QualType ToType,
     // until there are no more pointers or pointers-to-members left to
     // unwrap.
     UnwrappedAnyPointer = true;
+    
+    // @quals
+    FromType = stripCustomQuals(*this, FromType);
+    ToType = stripCustomQuals(*this, ToType);
 
     Qualifiers FromQuals = FromType.getQualifiers();
     Qualifiers ToQuals = ToType.getQualifiers();
