@@ -244,6 +244,11 @@ void TypePrinter::printBefore(const Type *T,Qualifiers Quals, raw_ostream &OS) {
 
   SaveAndRestore<bool> PrevPHIsEmpty(HasEmptyPlaceHolder);
 
+  // @quals
+  if (Quals.hasCustomQuals()) {
+    OS << "Q" << Quals.getCustomQuals() << " ";
+  }
+
   // Print qualifiers as appropriate.
 
   bool CanPrefixQualifiers = false;
