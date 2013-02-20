@@ -1356,8 +1356,6 @@ static bool tryAtomicConversion(Sema &S, Expr *From, QualType ToType,
 
 // @quals
 QualType stripCustomQuals(Sema &S, QualType typ) {
-  // llvm::errs() << typ.hasLocalNonFastQualifiers() << " "
-  //              << typ.getTypePtr() << "\n";
   if (typ.hasLocalNonFastQualifiers() && typ.getQualifiers().hasCustomQuals()) {
     // llvm::errs() << typ.hasLocalNonFastQualifiers() << "\n";
     // typ.dump();
@@ -1379,6 +1377,23 @@ QualType stripCustomQuals(Sema &S, QualType typ) {
 
   // No custom qualifiers present; leave type untouched.
   return typ;
+}
+
+
+// @quals
+// Like hasSameType but ignores custom qualifiers.
+// Modified from hasSimilarType.
+bool hasSameUnqType(ASTContext &Context, QualType T1, QualType T2) {
+  while (Context.UnwrapSimilarPointerTypes(T1, T2)) {
+    Qualifiers Quals1, Quals2;
+    T1 = Context.getUnqualifiedArrayType(T1, Quals1);
+    T2 = Context.getUnqualifiedArrayType(T2, Quals2);
+    Quals1.setCustomQuals(0);
+    Quals2.setCustomQuals(0);
+    if (Quals1 != Quals2)
+      return false;
+  }
+  return Context.hasSameUnqualifiedType(T1, T2);
 }
 
 
@@ -2581,7 +2596,7 @@ bool Sema::FunctionArgTypesAreEqual(const FunctionProtoType *OldType,
     for (FunctionProtoType::arg_type_iterator O = OldType->arg_type_begin(),
          N = NewType->arg_type_begin(),
          E = OldType->arg_type_end(); O && (O != E); ++O, ++N) {
-      if (!Context.hasSameType(*O, *N)) {
+      if (!hasSameUnqType(Context, *O, *N)) { // @quals
         if (ArgPos) *ArgPos = O - OldType->arg_type_begin();
         return false;
       }
@@ -2594,7 +2609,7 @@ bool Sema::FunctionArgTypesAreEqual(const FunctionProtoType *OldType,
        E = OldType->arg_type_end(); O && (O != E); ++O, ++N) {
     QualType ToType = (*O);
     QualType FromType = (*N);
-    if (!Context.hasSameType(ToType, FromType)) {
+    if (!hasSameUnqType(Context, ToType, FromType)) { // @quals
       if (const PointerType *PTTo = ToType->getAs<PointerType>()) {
         if (const PointerType *PTFr = FromType->getAs<PointerType>())
           if ((PTTo->getPointeeType()->isObjCQualifiedIdType() &&
