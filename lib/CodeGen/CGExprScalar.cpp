@@ -1886,6 +1886,7 @@ LValue ScalarExprEmitter::EmitCompoundAssignLValue(
 
   // Expand the binary operator.
   Result = (this->*Func)(OpInfo);
+  CGF.addQualData(Result, LHSTy); //@quals
   
   // Convert the result back to the LHS type.
   Result = EmitScalarConversion(Result, E->getComputationResultType(), LHSTy);
