@@ -1356,6 +1356,17 @@ static bool tryAtomicConversion(Sema &S, Expr *From, QualType ToType,
 
 // @quals
 QualType stripCustomQuals(Sema &S, QualType typ) {
+  if (const FunctionProtoType *ft = dyn_cast<FunctionProtoType>(typ)) {
+    QualType restype = stripCustomQuals(S, ft->getResultType());
+    std::vector<QualType> argtypes;
+    for (unsigned i = 0; i < ft->getNumArgs(); ++i) {
+      argtypes.push_back(stripCustomQuals(S, ft->getArgType(i)));
+    }
+    return S.getASTContext().getFunctionType(restype, argtypes.data(),
+                                             argtypes.size(),
+                                             ft->getExtProtoInfo());
+  }
+
   if (typ.hasLocalNonFastQualifiers() && typ.getQualifiers().hasCustomQuals()) {
     // llvm::errs() << typ.hasLocalNonFastQualifiers() << "\n";
     // typ.dump();

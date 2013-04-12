@@ -2125,7 +2125,7 @@ bool Sema::MergeFunctionDecl(FunctionDecl *New, Decl *OldD, Scope *S) {
     QualType OldReturnType = OldType->getResultType();
     QualType NewReturnType = cast<FunctionType>(NewQType)->getResultType();
     QualType ResQT;
-    if (OldReturnType != NewReturnType) {
+    if (!hasSameUnqType(Context, OldReturnType, NewReturnType)) { // @quals
       if (NewReturnType->isObjCObjectPointerType()
           && OldReturnType->isObjCObjectPointerType())
         ResQT = Context.mergeObjCGCQualifiers(NewQType, OldQType);
@@ -2225,6 +2225,10 @@ bool Sema::MergeFunctionDecl(FunctionDecl *New, Decl *OldD, Scope *S) {
       OldQTypeForComparison = QualType(OldTypeForComparison, 0);
       assert(OldQTypeForComparison.isCanonical());
     }
+
+    // @quals
+    OldQTypeForComparison = stripCustomQuals(*this, OldQTypeForComparison);
+    NewQType = stripCustomQuals(*this, NewQType);
 
     if (OldQTypeForComparison == NewQType)
       return MergeCompatibleFunctionDecls(New, Old, S);

@@ -25,6 +25,10 @@ inline PartialDiagnostic Sema::PDiag(unsigned DiagID) {
   return PartialDiagnostic(DiagID, Context.getDiagAllocator());
 }
 
+// @quals
+QualType stripCustomQuals(Sema &S, QualType typ);
+bool hasSameUnqType(ASTContext &Context, QualType T1, QualType T2);
+
 }
 
 #endif
