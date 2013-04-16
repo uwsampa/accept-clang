@@ -1367,6 +1367,14 @@ QualType stripCustomQuals(Sema &S, QualType typ) {
                                              ft->getExtProtoInfo());
   }
 
+  // Recurse into pointer types.
+  if (const PointerType *pt = dyn_cast<PointerType>(typ)) {
+    QualType innerType = stripCustomQuals(S, pt->getPointeeType());
+    QualType newType = S.Context.getPointerType(innerType);
+    newType = S.Context.getQualifiedType(newType, typ.getQualifiers());
+    typ = newType;
+  }
+
   if (typ.hasLocalNonFastQualifiers() && typ.getQualifiers().hasCustomQuals()) {
     // llvm::errs() << typ.hasLocalNonFastQualifiers() << "\n";
     // typ.dump();
