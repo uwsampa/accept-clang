@@ -12,7 +12,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "CGDebugInfo.h"
-#include "CodeGenFunction.h"
 #include "CodeGenModule.h"
 #include "CGBlocks.h"
 #include "CGObjCRuntime.h"
@@ -36,6 +35,8 @@
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/DataLayout.h"
+#include "CodeGenFunction.h"
+//#include <iostream>
 using namespace clang;
 using namespace clang::CodeGen;
 
@@ -2695,6 +2696,10 @@ void CGDebugInfo::EmitGlobalVariable(llvm::GlobalVariable *Var,
                                               ArrayType::Normal, 0);
   }
   StringRef DeclName = D->getName();
+  //std::cerr << "Global: " << D->getName().data() << std::endl;
+  //llvm::Instruction *tmp_i = (llvm::Instruction *)D;
+  //llvm::Instruction *tmp_i = dyn_cast<llvm::Instruction>(Var);
+  //addQualData(tmp_i, D->getType());
   StringRef LinkageName;
   if (D->getDeclContext() && !isa<FunctionDecl>(D->getDeclContext())
       && !isa<ObjCMethodDecl>(D->getDeclContext()))

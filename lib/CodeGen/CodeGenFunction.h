@@ -537,6 +537,7 @@ class CodeGenFunction : public CodeGenTypeCache {
 
   friend class CGCXXABI;
 public:
+  friend class CGDebugInfo;
   // @quals
   void addQualData(llvm::Instruction *inst, QualType ty);
   void addQualData(llvm::Value *value, QualType ty);

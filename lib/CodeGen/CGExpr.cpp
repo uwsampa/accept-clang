@@ -29,6 +29,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/DataLayout.h"
 #include "llvm/ADT/Hashing.h"
+#include <iostream>
 using namespace clang;
 using namespace CodeGen;
 
@@ -906,6 +907,7 @@ CodeGenFunction::tryEmitAsConstant(DeclRefExpr *refExpr) {
 }
 
 // @quals
+//LV.getType()
 void CodeGenFunction::addQualData(llvm::Instruction *inst, QualType ty) {
   if (inst->getMetadata("quals")) {
     // llvm::errs() << "already has metadata: ";
@@ -920,6 +922,8 @@ void CodeGenFunction::addQualData(llvm::Instruction *inst, QualType ty) {
     customQuals = 0;
 
   std::vector<llvm::Value*> qualVals;
+  //std::cerr << "customQuals: " << customQuals << std::endl;
+  //std:: cerr << "int32ty: " << (*Int32Ty) << std::endl;
   qualVals.push_back(llvm::ConstantInt::get(Int32Ty, customQuals, false));
   llvm::MDNode *qualMD = llvm::MDNode::get(inst->getContext(), qualVals);
   inst->setMetadata("quals", qualMD);

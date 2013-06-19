@@ -18,6 +18,9 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/Basic/ABI.h"
+#include "llvm/Support/raw_ostream.h"
+#include <iostream>
+#include <string>
 
 namespace clang {
 
@@ -33,12 +36,32 @@ class GlobalDecl {
     assert(!isa<CXXDestructorDecl>(D) && "Use other ctor with dtor decls!");
 
     Value.setPointer(D);
+    is_approx = false;
   }
+  const VarDecl *underlying_VarDecl;
+  QualType my_QualType;
+  bool is_approx;
 
 public:
   GlobalDecl() {}
+  
+  QualType getQualType() const { return my_QualType; }
+  
+  const VarDecl *get_VarDecl() const { return underlying_VarDecl; }
+  
+  bool isApprox() const { return is_approx; }
 
-  GlobalDecl(const VarDecl *D) { Init(D);}
+  GlobalDecl(const VarDecl *D) {
+    Init(D);
+    underlying_VarDecl = D;
+    my_QualType = D->getTypeSourceInfo()->getType();
+    //std::cerr << D->getStorageClassSpecifierString(D->getStorageClassAsWritten()) << std::endl;
+    std::string type_str;
+    llvm::raw_string_ostream rso(type_str);
+    D->dump(rso);
+    if (rso.str().find("approx") != std::string::npos) is_approx = true;
+    //std::cerr <<  rso.str() << "\t--->" << is_approx << std::endl;
+  }
   GlobalDecl(const FunctionDecl *D) { Init(D); }
   GlobalDecl(const BlockDecl *D) { Init(D); }
   GlobalDecl(const ObjCMethodDecl *D) { Init(D); }
