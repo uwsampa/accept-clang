@@ -18,6 +18,9 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/Basic/ABI.h"
+#include "llvm/Support/raw_ostream.h"
+#include <fstream>
+#include <string>
 
 namespace clang {
 
