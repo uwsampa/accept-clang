@@ -30,7 +30,6 @@
 #include "llvm/Support/CFG.h"
 #include "llvm/DataLayout.h"
 #include <cstdarg>
-#include <iostream>
 
 using namespace clang;
 using namespace CodeGen;
@@ -672,7 +671,6 @@ Value *ScalarExprEmitter::EmitScalarConversionHelper(Value *Src, QualType SrcTyp
   llvm::Value *OrigSrc = Src;
   QualType OrigSrcType = SrcType;
   llvm::Type *SrcTy = Src->getType();
-  //std::cerr << "\n" << OrigSrc->getName().str() << "\tFrom type: " << SrcType.getAsString() << std::endl;
 
   // Floating casts might be a bit special: if we're doing casts to / from half
   // FP, we should go via special intrinsics.

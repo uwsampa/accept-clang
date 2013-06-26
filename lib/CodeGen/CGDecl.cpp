@@ -26,7 +26,6 @@
 #include "llvm/Intrinsics.h"
 #include "llvm/DataLayout.h"
 #include "llvm/Type.h"
-#include <iostream>
 using namespace clang;
 using namespace CodeGen;
 
@@ -279,8 +278,6 @@ void CodeGenFunction::EmitStaticVarDecl(const VarDecl &D,
                                       llvm::GlobalValue::LinkageTypes Linkage) {
   llvm::Value *&DMEntry = LocalDeclMap[&D];
   assert(DMEntry == 0 && "Decl already exists in localdeclmap!");
-    
-  //std::cerr << "Global: " << D.getName().data() << std::endl;
 
   // Check to see if we already have a global variable for this
   // declaration.  This can happen when double-emitting function
@@ -782,7 +779,6 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D) {
 CodeGenFunction::AutoVarEmission
 CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
   QualType Ty = D.getType();
-    //std::cerr << "Auto: " << D.getName().data() << std::endl;
 
   AutoVarEmission emission(D);
 

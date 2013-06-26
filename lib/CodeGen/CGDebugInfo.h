@@ -22,7 +22,6 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/ValueHandle.h"
 #include "llvm/Support/Allocator.h"
-#include "llvm/LLVMContext.h"
 
 #include "CGBuilder.h"
 

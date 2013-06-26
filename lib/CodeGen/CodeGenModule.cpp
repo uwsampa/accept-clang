@@ -45,8 +45,6 @@
 #include "llvm/DataLayout.h"
 #include "llvm/Support/CallSite.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/raw_ostream.h"
-#include <iostream>
 using namespace clang;
 using namespace CodeGen;
 
@@ -177,7 +175,7 @@ void CodeGenModule::Release() {
 
   SimplifyPersonality();
 
-  //if (getCodeGenOpts().EmitDeclMetadata)
+  if (getCodeGenOpts().EmitDeclMetadata)
     EmitDeclMetadata();
 
   if (getCodeGenOpts().EmitGcovArcs || getCodeGenOpts().EmitGcovNotes)
@@ -2757,8 +2755,6 @@ static void EmitGlobalDeclMetadata(CodeGenModule &CGM,
     GetPointerConstant(CGM.getLLVMContext(), D.getDecl())
   };
   GlobalMetadata->addOperand(llvm::MDNode::get(CGM.getLLVMContext(), Ops));
-  if (D.isApprox()) Addr->setApprox(true);
-  
 }
 
 /// Emits metadata nodes associating all the global values in the
