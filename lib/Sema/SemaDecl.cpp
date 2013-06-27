@@ -2014,6 +2014,10 @@ bool Sema::MergeFunctionDecl(FunctionDecl *New, Decl *OldD, Scope *S) {
   QualType OldQType = Context.getCanonicalType(Old->getType());
   QualType NewQType = Context.getCanonicalType(New->getType());
 
+  // @quals
+  OldQType = stripCustomQuals(*this, OldQType);
+  NewQType = stripCustomQuals(*this, NewQType);
+
   // Don't complain about this if we're in GNU89 mode and the old function
   // is an extern inline function.
   if (!isa<CXXMethodDecl>(New) && !isa<CXXMethodDecl>(Old) &&
