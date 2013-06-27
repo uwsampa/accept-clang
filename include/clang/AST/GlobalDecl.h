@@ -43,6 +43,9 @@ public:
 
   GlobalDecl(const VarDecl *D) {
     Init(D);
+    // @qual A hacky way to store qualifier information on globals. (This is
+    // all to work around the fact that LLVM IR doesn't currently have
+    // metadata on global declarations.)
     std::string type_str;
     llvm::raw_string_ostream rso(type_str);
     D->dump(rso);
@@ -51,7 +54,7 @@ public:
       std::string NameRefStr = NameRef.str();
       if (!NameRefStr.empty()) {
         bool is_name = false;
-        for (int i = 0; i < NameRefStr.size(); ++i) if (isalnum(NameRefStr[i])) is_name = true;
+        for (unsigned long i = 0; i < NameRefStr.size(); ++i) if (isalnum(NameRefStr[i])) is_name = true;
         if (is_name) {
           std::ofstream f;
           f.open("accept-globals-info.txt", std::ios::out | std::ios::app);
@@ -59,6 +62,7 @@ public:
           f.close();
         }
       }
+    }
   }
   
   GlobalDecl(const FunctionDecl *D) { Init(D); }
