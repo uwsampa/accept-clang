@@ -919,6 +919,11 @@ void CodeGenFunction::addQualData(llvm::Instruction *inst, QualType ty) {
   else
     customQuals = 0;
 
+  // EnerC specific! Use a different qualifier flag for pointer instructions
+  // that are marked approximate.
+  if (isa<llvm::GetElementPtrInst>(inst) && customQuals == 1)
+    customQuals = 2;
+
   std::vector<llvm::Value*> qualVals;
   qualVals.push_back(llvm::ConstantInt::get(Int32Ty, customQuals, false));
   llvm::MDNode *qualMD = llvm::MDNode::get(inst->getContext(), qualVals);
@@ -2239,6 +2244,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E) {
     else
       Address = Builder.CreateInBoundsGEP(Base, Idx, "arrayidx");
   }
+  addQualData(Address, E->getType()); //@quals
 
   QualType T = E->getBase()->getType()->getPointeeType();
   assert(!T.isNull() &&
