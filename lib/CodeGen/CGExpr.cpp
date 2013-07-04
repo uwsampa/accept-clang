@@ -2396,6 +2396,7 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
     // For structs, we GEP to the field that the record layout suggests.
     unsigned idx = CGM.getTypes().getCGRecordLayout(rec).getLLVMFieldNo(field);
     addr = Builder.CreateStructGEP(addr, idx, field->getName());
+    addQualData(addr, field->getType()); //@quals
 
     // If this is a reference field, load the reference right now.
     if (const ReferenceType *refType = type->getAs<ReferenceType>()) {
