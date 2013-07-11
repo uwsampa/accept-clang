@@ -919,10 +919,19 @@ void CodeGenFunction::addQualData(llvm::Instruction *inst, QualType ty) {
   else
     customQuals = 0;
 
-  // EnerC specific! Use a different qualifier flag for pointer instructions
-  // that are marked approximate.
-  if (isa<llvm::GetElementPtrInst>(inst) && customQuals == 1)
+  // WARNING: Giant, EnerC-specific hack!
+  // Use a different qualifier flag for pointer instructions that are marked
+  // approximate.
+  if (isa<llvm::GetElementPtrInst>(inst) && customQuals == 1) {
     customQuals = 2;
+  } else if (ty->isPointerType()) {
+    QualType innerTy = ty->getPointeeType();
+    if (innerTy.hasLocalNonFastQualifiers()) {
+      uint32_t innerCQ = innerTy.getQualifiers().getCustomQuals();
+      if (innerCQ == 1)
+        customQuals = 2;
+    }
+  }
 
   std::vector<llvm::Value*> qualVals;
   qualVals.push_back(llvm::ConstantInt::get(Int32Ty, customQuals, false));
