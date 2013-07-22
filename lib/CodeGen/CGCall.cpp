@@ -1220,7 +1220,17 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
         assert(AI != Fn->arg_end() && "Argument mismatch!");
         llvm::Value *V = AI;
 
-        if (Arg->getType().isRestrictQualified())
+        // @quals
+        // WARNING: EnerC-specific.
+        bool isApprox = false;
+        if (Ty.hasLocalNonFastQualifiers())
+          isApprox = Ty.getQualifiers().getCustomQuals();
+        if (!isApprox && Ty->isPointerType()) {
+          QualType innerTy = Ty->getPointeeType();
+          isApprox = innerTy.getQualifiers().getCustomQuals();
+        }
+
+        if (Arg->getType().isRestrictQualified() || isApprox) // @quals
           AI->addAttr(llvm::Attributes::get(getLLVMContext(),
                                             llvm::Attributes::NoAlias));
 
