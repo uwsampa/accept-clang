@@ -28,6 +28,7 @@
 #include "llvm/DataLayout.h"
 #include "llvm/InlineAsm.h"
 #include "llvm/Transforms/Utils/Local.h"
+#include <fstream>
 using namespace clang;
 using namespace CodeGen;
 
@@ -1638,6 +1639,15 @@ void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI) {
     const FunctionDecl *fundecl = dyn_cast<FunctionDecl>(CurGD.getDecl());
     if (fundecl) {
       addQualData(Ret, fundecl->getResultType());
+      bool isApprox = false;
+      if (fundecl->getResultType().hasLocalNonFastQualifiers())
+        isApprox = fundecl->getResultType().getQualifiers().getCustomQuals();
+      if (isApprox) {
+        std::ofstream f;
+        f.open("accept-approxRetValueFunctions-info.txt", std::ios::out | std::ios::app);
+        f << fundecl->getNameInfo().getAsString() << "\n";
+        f.close();
+      }
     }
   }
 
