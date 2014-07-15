@@ -731,7 +731,9 @@ void CodeGenFunction::EmitCXXForRangeStmt(const CXXForRangeStmt &S) {
 
 void CodeGenFunction::EmitReturnOfRValue(RValue RV, QualType Ty) {
   if (RV.isScalar()) {
-    Builder.CreateStore(RV.getScalarVal(), ReturnValue);
+    // @quals
+    llvm::Instruction *Store = Builder.CreateStore(RV.getScalarVal(), ReturnValue);
+    addQualData(Store, Ty);
   } else if (RV.isAggregate()) {
     EmitAggregateCopy(ReturnValue, RV.getAggregateAddr(), Ty);
   } else {
@@ -783,7 +785,9 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
     RValue Result = EmitReferenceBindingToExpr(RV, /*InitializedDecl=*/0);
     Builder.CreateStore(Result.getScalarVal(), ReturnValue);
   } else if (!hasAggregateLLVMType(RV->getType())) {
-    Builder.CreateStore(EmitScalarExpr(RV), ReturnValue);
+    // @quals
+    llvm::Instruction *Store = Builder.CreateStore(EmitScalarExpr(RV), ReturnValue);
+    addQualData(Store, FnRetTy);
   } else if (RV->getType()->isAnyComplexType()) {
     EmitComplexExprIntoAddr(RV, ReturnValue, false);
   } else {
