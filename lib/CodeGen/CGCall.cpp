@@ -29,6 +29,9 @@
 #include "llvm/InlineAsm.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include <fstream>
+#include <sstream>
+#include <string>
+#include <cctype>
 using namespace clang;
 using namespace CodeGen;
 
@@ -1234,6 +1237,47 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
         if (Arg->getType().isRestrictQualified() || isApprox) // @quals
           AI->addAttr(llvm::Attributes::get(getLLVMContext(),
                                             llvm::Attributes::NoAlias));
+
+        static std::set<std::string> seen;
+
+        const FunctionDecl *fundecl = dyn_cast<FunctionDecl>(CurGD.getDecl());
+        std::string f_name = fundecl->getNameInfo().getAsString();
+        if (seen.count(f_name) == 0) {
+          seen.insert(f_name);
+          std::ofstream f;
+          f.open("accept-npuArrayArgs-info.txt", std::ios::out | std::ios::app);
+          f << fundecl->getNameInfo().getAsString() << "\n";
+
+          for (int i = 0; i < fundecl->getNumParams(); ++i) {
+            std::string p_name = fundecl->getParamDecl(i)->getOriginalType().getAsString();
+
+            size_t pos_first = p_name.find_first_of("[");
+            if (pos_first == std::string::npos ||
+                p_name.find_first_of("[", pos_first+1) != std::string::npos ||
+                p_name[pos_first+1] == ']') {
+              f << "0\n";
+              continue;
+            }
+
+            size_t n_pos = pos_first;
+            while (std::isspace(p_name[++n_pos]));
+
+            if (p_name[n_pos] == ']') {
+              f << "0\n";
+              continue;
+            }
+
+            std::istringstream ss(p_name.substr(n_pos));
+            int array_size;
+            ss >> array_size;
+
+            f << array_size << "\n";
+          } // for each param
+
+          f << "\n";
+          f.close();
+        }
+
 
         // Ensure the argument is the correct type.
         if (V->getType() != ArgI.getCoerceToType())
