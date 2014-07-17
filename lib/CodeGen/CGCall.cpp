@@ -1248,6 +1248,9 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
           f.open("accept-npuArrayArgs-info.txt", std::ios::out | std::ios::app);
           f << fundecl->getNameInfo().getAsString() << "\n";
 
+          // Look for one dimensional arrays with specified size first.
+          std::vector<bool> is_uni_array;
+          std::vector<int>  sizes;
           for (int i = 0; i < fundecl->getNumParams(); ++i) {
             std::string p_name = fundecl->getParamDecl(i)->getOriginalType().getAsString();
 
@@ -1255,7 +1258,8 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
             if (pos_first == std::string::npos ||
                 p_name.find_first_of("[", pos_first+1) != std::string::npos ||
                 p_name[pos_first+1] == ']') {
-              f << "0\n";
+              is_uni_array.push_back(false);
+              sizes.push_back(0);
               continue;
             }
 
@@ -1263,7 +1267,8 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
             while (std::isspace(p_name[++n_pos]));
 
             if (p_name[n_pos] == ']') {
-              f << "0\n";
+              is_uni_array.push_back(false);
+              sizes.push_back(0);
               continue;
             }
 
@@ -1271,7 +1276,39 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
             int array_size;
             ss >> array_size;
 
-            f << array_size << "\n";
+            sizes.push_back(array_size);
+            is_uni_array.push_back(true);
+          } // for each param
+
+          // Now look for two dimensional arrays with the second index specified.
+          for (int i = 0; i < fundecl->getNumParams(); ++i) {
+            if (is_uni_array[i]) {
+              f << sizes[i] << "\n";
+              continue;
+            }
+
+            std::string p_name = fundecl->getParamDecl(i)->getOriginalType().getAsString();
+            size_t pos_first = p_name.find_first_of("[");
+            if (pos_first == std::string::npos) {
+              f << "0\n";
+              continue;
+            }
+
+            // Found the first [
+            // If there's anything between the first [ and the first ],
+            // it doesn't matter.
+            // So, find the next [.
+            // If it doesn't exist or there's still one more [, give up.
+            size_t pos_second = p_name.find_first_of("[", pos_first+1);
+            if (pos_second == std::string::npos ||
+                p_name.find_first_of("[", pos_second+1) != std::string::npos) {
+              f << "0\n";
+              continue;
+            }
+
+            // -1 means we found a parameter like [][n], where n is optional.
+            f << "-1\n";
+
           } // for each param
 
           f << "\n";
